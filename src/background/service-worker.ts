@@ -1,6 +1,7 @@
 import { putHistoryRecord } from "../history/db";
 import type { LookupHistoryRecord } from "../history/types";
 import { streamOpenAiCompatible } from "../llm/openai-compatible";
+import { getMiMoPronunciation } from "../pronunciation/mimo";
 import { getYoudaoPronunciation } from "../pronunciation/youdao";
 import type {
   LookupPortRequest,
@@ -312,11 +313,26 @@ chrome.runtime.onMessage.addListener((
   void (async () => {
     try {
       const settings = await loadLookupSettings();
+      if (settings.pronunciation.provider === "off") {
+        throw new Error("发音功能已关闭。");
+      }
+
+      if (settings.pronunciation.provider === "mimo") {
+        const mimoApiKey = settings.pronunciation.mimo.apiKey
+          || (settings.api.provider === "mimo" ? settings.api.apiKey : "");
+        const result = await getMiMoPronunciation(message.word, {
+          ...settings.pronunciation.mimo,
+          apiKey: mimoApiKey
+        });
+        sendResponse({ ok: true, provider: "mimo", ...result });
+        return;
+      }
+
       const result = await getYoudaoPronunciation(
         message.word,
-        settings.pronunciation.youdao
+        { ...settings.pronunciation.youdao, enabled: true }
       );
-      sendResponse({ ok: true, ...result });
+      sendResponse({ ok: true, provider: "youdao", ...result });
     } catch (error) {
       sendResponse({
         ok: false,

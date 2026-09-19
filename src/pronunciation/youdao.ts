@@ -1,13 +1,5 @@
 import type { YoudaoSettings } from "../shared/settings";
-
-export interface PronunciationResult {
-  phonetic?: string;
-  audioDataUrl?: string;
-}
-
-export interface PronunciationProvider {
-  getPronunciation(word: string, signal?: AbortSignal): Promise<PronunciationResult>;
-}
+import type { PronunciationProvider, PronunciationResult } from "./types";
 
 function truncateForSign(input: string): string {
   if (input.length <= 20) return input;
@@ -110,7 +102,8 @@ export async function getYoudaoPronunciation(
 
   return {
     phonetic: basic.ukPhonetic,
-    audioDataUrl
+    audioDataUrl,
+    label: "有道词典 · 英音"
   };
 }
 

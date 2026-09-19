@@ -20,6 +20,29 @@ describe("settings migration and prompt routing", () => {
     expect(resolvePrompt(settings, "sentence").systemPrompt).toBe("legacy sentence prompt");
   });
 
+  it("uses MiMo TTS as the default pronunciation provider", () => {
+    const settings = normalizeSettings({});
+    expect(settings.pronunciation.provider).toBe("mimo");
+    expect(settings.pronunciation.mimo.model).toBe("mimo-v2.5-tts");
+    expect(settings.pronunciation.mimo.voice).toBe("Mia");
+    expect(settings.pronunciation.mimo.style).toContain("British English accent");
+  });
+
+  it("keeps an explicitly enabled legacy Youdao setup as the fallback provider", () => {
+    const settings = normalizeSettings({
+      pronunciation: {
+        youdao: {
+          enabled: true,
+          appKey: "legacy-key",
+          appSecret: "legacy-secret"
+        }
+      }
+    });
+
+    expect(settings.pronunciation.provider).toBe("youdao");
+    expect(settings.pronunciation.youdao.appKey).toBe("legacy-key");
+  });
+
   it("routes explicit prompts and keeps defaults", () => {
     const settings = normalizeSettings({
       prompts: {

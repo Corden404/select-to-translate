@@ -7,6 +7,8 @@ import {
   loadLookupSettings,
   normalizeSettings,
   type LookupSettings,
+  type MimoVoiceId,
+  type PronunciationProviderId,
   type PromptApplicableType,
   type PromptDefinition,
   type ProviderId,
@@ -46,7 +48,14 @@ const resetPrompts=byId<HTMLButtonElement>("resetPrompts");
 const exportPrompts=byId<HTMLButtonElement>("exportPrompts");
 const importPrompts=byId<HTMLButtonElement>("importPrompts");
 const importFile=byId<HTMLInputElement>("importFile");
-const youdaoEnabled=byId<HTMLInputElement>("youdaoEnabled");
+const pronunciationProvider=byId<HTMLSelectElement>("pronunciationProvider");
+const pronunciationNote=byId<HTMLParagraphElement>("pronunciationNote");
+const mimoTtsSettings=byId<HTMLDivElement>("mimoTtsSettings");
+const mimoTtsKey=byId<HTMLInputElement>("mimoTtsKey");
+const mimoTtsBaseUrl=byId<HTMLInputElement>("mimoTtsBaseUrl");
+const mimoVoice=byId<HTMLSelectElement>("mimoVoice");
+const mimoTtsStyle=byId<HTMLTextAreaElement>("mimoTtsStyle");
+const youdaoSettings=byId<HTMLDivElement>("youdaoSettings");
 const youdaoKey=byId<HTMLInputElement>("youdaoKey");
 const youdaoSecret=byId<HTMLInputElement>("youdaoSecret");
 const save=byId<HTMLButtonElement>("save");
@@ -77,6 +86,17 @@ function applyPopupTheme(value:UiTheme):void{
     ?(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light")
     :value;
   document.documentElement.dataset.theme=resolved;
+}
+
+function renderPronunciationSettings():void{
+  const selected=pronunciationProvider.value as PronunciationProviderId;
+  mimoTtsSettings.classList.toggle("hidden",selected!=="mimo");
+  youdaoSettings.classList.toggle("hidden",selected!=="youdao");
+  pronunciationNote.textContent=selected==="mimo"
+    ?"默认使用 MiMo-V2.5-TTS。当前官方标注为限时免费；只有点击发音按钮时才会生成音频。"
+    :selected==="youdao"
+      ?"使用有道智云词典的英式音标与英音，作为备用发音服务。"
+      :"发音按钮将隐藏，不会向第三方语音服务发送文本。";
 }
 
 function currentPrompt():PromptDefinition|undefined{
@@ -187,7 +207,11 @@ async function loadForm():Promise<void>{
   timeout.value=String(Math.round(working.api.timeoutMs/1000));
   theme.value=working.ui.theme;
   fontSize.value=working.ui.fontSize;
-  youdaoEnabled.checked=working.pronunciation.youdao.enabled;
+  pronunciationProvider.value=working.pronunciation.provider;
+  mimoTtsKey.value=working.pronunciation.mimo.apiKey;
+  mimoTtsBaseUrl.value=working.pronunciation.mimo.baseUrl;
+  mimoVoice.value=working.pronunciation.mimo.voice;
+  mimoTtsStyle.value=working.pronunciation.mimo.style;
   youdaoKey.value=working.pronunciation.youdao.appKey;
   youdaoSecret.value=working.pronunciation.youdao.appSecret;
   editingPromptId=working.prompts.items[0]?.id??"";
@@ -195,6 +219,7 @@ async function loadForm():Promise<void>{
   if(tabs[0]?.url&&/\\.pdf(?:$|[?#])/i.test(tabs[0].url)){
     openPdf.textContent="用查词阅读器打开当前 PDF";
   }
+  renderPronunciationSettings();
   renderProviderDetails();
   renderPromptEditor();
   applyPopupTheme(working.ui.theme);
@@ -207,6 +232,7 @@ provider.addEventListener("change",()=>{
   renderProviderDetails();
 });
 theme.addEventListener("change",()=>applyPopupTheme(theme.value as UiTheme));
+pronunciationProvider.addEventListener("change",renderPronunciationSettings);
 toggleKey.addEventListener("click",()=>{
   const show=apiKey.type==="password";
   apiKey.type=show?"text":"password";
@@ -298,10 +324,20 @@ save.addEventListener("click",()=>{
       model:model.value.trim(),
       timeoutMs:Math.min(120000,Math.max(5000,Number(timeout.value||45)*1000))
     };
-    working.pronunciation.youdao={
-      enabled:youdaoEnabled.checked,
-      appKey:youdaoKey.value.trim(),
-      appSecret:youdaoSecret.value.trim()
+    working.pronunciation={
+      provider:pronunciationProvider.value as PronunciationProviderId,
+      mimo:{
+        apiKey:mimoTtsKey.value.trim(),
+        baseUrl:mimoTtsBaseUrl.value.trim()||DEFAULT_SETTINGS.pronunciation.mimo.baseUrl,
+        model:"mimo-v2.5-tts",
+        voice:mimoVoice.value as MimoVoiceId,
+        style:mimoTtsStyle.value.trim()||DEFAULT_SETTINGS.pronunciation.mimo.style
+      },
+      youdao:{
+        enabled:pronunciationProvider.value==="youdao",
+        appKey:youdaoKey.value.trim(),
+        appSecret:youdaoSecret.value.trim()
+      }
     };
     working.prompts.defaultWordPromptId=defaultWordPrompt.value||working.prompts.defaultWordPromptId;
     working.prompts.defaultSentencePromptId=defaultSentencePrompt.value||working.prompts.defaultSentencePromptId;

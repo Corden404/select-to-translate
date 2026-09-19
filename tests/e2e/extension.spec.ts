@@ -109,7 +109,9 @@ test("extension lookup, streaming chat, history, settings, and PDF work end to e
     const popup = await context.newPage();
     await popup.goto("chrome-extension://" + extensionId + "/popup.html");
     await expect(popup.getByText("Prompt 管理")).toBeVisible();
-    await expect(popup.getByText("有道英式发音")).toBeVisible();
+    await expect(popup.getByText("发音设置")).toBeVisible();
+    await expect(popup.locator("#pronunciationProvider")).toHaveValue("mimo");
+    await expect(popup.locator("#mimoVoice")).toHaveValue("Mia");
 
     await popup.locator("#provider").selectOption("custom");
     await popup.locator("#apiKey").fill("test-key");

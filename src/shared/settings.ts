@@ -34,6 +34,17 @@ export interface YoudaoSettings {
   appSecret: string;
 }
 
+export type PronunciationProviderId = "mimo" | "youdao" | "off";
+export type MimoVoiceId = "Mia" | "Chloe" | "Milo" | "Dean";
+
+export interface MimoTtsSettings {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  voice: MimoVoiceId;
+  style: string;
+}
+
 export interface LookupSettings {
   ui: {
     theme: UiTheme;
@@ -47,6 +58,8 @@ export interface LookupSettings {
     timeoutMs: number;
   };
   pronunciation: {
+    provider: PronunciationProviderId;
+    mimo: MimoTtsSettings;
     youdao: YoudaoSettings;
   };
   prompts: {
@@ -172,6 +185,14 @@ export const DEFAULT_SETTINGS: LookupSettings = {
     timeoutMs: 45000
   },
   pronunciation: {
+    provider: "mimo",
+    mimo: {
+      apiKey: "",
+      baseUrl: "https://api.xiaomimimo.com/v1",
+      model: "mimo-v2.5-tts",
+      voice: "Mia",
+      style: "Use a clear, natural British English accent. Pronounce the selected word or phrase once, at a moderate dictionary-like pace, with precise articulation and no extra words."
+    },
     youdao: {
       enabled: false,
       appKey: "",
@@ -187,6 +208,14 @@ export const DEFAULT_SETTINGS: LookupSettings = {
 
 function isProviderId(value: unknown): value is ProviderId {
   return typeof value === "string" && value in PROVIDER_PRESETS;
+}
+
+function isPronunciationProviderId(value: unknown): value is PronunciationProviderId {
+  return value === "mimo" || value === "youdao" || value === "off";
+}
+
+function isMimoVoiceId(value: unknown): value is MimoVoiceId {
+  return value === "Mia" || value === "Chloe" || value === "Milo" || value === "Dean";
 }
 
 function isTheme(value: unknown): value is UiTheme {
@@ -306,6 +335,9 @@ export function normalizeSettings(raw: unknown): LookupSettings {
   const rawPronunciation = (value.pronunciation && typeof value.pronunciation === "object"
     ? value.pronunciation
     : {}) as Partial<LookupSettings["pronunciation"]>;
+  const rawMimo = (rawPronunciation.mimo && typeof rawPronunciation.mimo === "object"
+    ? rawPronunciation.mimo
+    : {}) as Partial<MimoTtsSettings>;
   const rawYoudao = (rawPronunciation.youdao && typeof rawPronunciation.youdao === "object"
     ? rawPronunciation.youdao
     : {}) as Partial<YoudaoSettings>;
@@ -313,6 +345,11 @@ export function normalizeSettings(raw: unknown): LookupSettings {
   const provider = isProviderId(rawApi.provider) ? rawApi.provider : DEFAULT_SETTINGS.api.provider;
   const preset = PROVIDER_PRESETS[provider];
   const timeoutMs = Number(rawApi.timeoutMs);
+  const pronunciationProvider = isPronunciationProviderId(rawPronunciation.provider)
+    ? rawPronunciation.provider
+    : rawYoudao.enabled === true
+      ? "youdao"
+      : DEFAULT_SETTINGS.pronunciation.provider;
 
   return {
     ui: {
@@ -329,8 +366,24 @@ export function normalizeSettings(raw: unknown): LookupSettings {
         : DEFAULT_SETTINGS.api.timeoutMs
     },
     pronunciation: {
+      provider: pronunciationProvider,
+      mimo: {
+        apiKey: typeof rawMimo.apiKey === "string" ? rawMimo.apiKey.trim() : "",
+        baseUrl: typeof rawMimo.baseUrl === "string" && rawMimo.baseUrl.trim()
+          ? rawMimo.baseUrl.trim()
+          : DEFAULT_SETTINGS.pronunciation.mimo.baseUrl,
+        model: typeof rawMimo.model === "string" && rawMimo.model.trim()
+          ? rawMimo.model.trim()
+          : DEFAULT_SETTINGS.pronunciation.mimo.model,
+        voice: isMimoVoiceId(rawMimo.voice)
+          ? rawMimo.voice
+          : DEFAULT_SETTINGS.pronunciation.mimo.voice,
+        style: typeof rawMimo.style === "string" && rawMimo.style.trim()
+          ? rawMimo.style.trim()
+          : DEFAULT_SETTINGS.pronunciation.mimo.style
+      },
       youdao: {
-        enabled: rawYoudao.enabled === true,
+        enabled: pronunciationProvider === "youdao",
         appKey: typeof rawYoudao.appKey === "string" ? rawYoudao.appKey.trim() : "",
         appSecret: typeof rawYoudao.appSecret === "string" ? rawYoudao.appSecret.trim() : ""
       }

@@ -43,7 +43,9 @@ export type OneShotMessage =
 
 export interface PronunciationResponse {
   ok: boolean;
+  provider?: "mimo" | "youdao";
   phonetic?: string;
   audioDataUrl?: string;
+  label?: string;
   message?: string;
 }

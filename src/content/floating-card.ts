@@ -223,8 +223,18 @@ export class FloatingCard {
     this.status.textContent = "准备查询";
     this.followUpButton.disabled = true;
     this.initialResponseText = "";
-    this.pronunciationRow.classList.toggle("visible", query.selection.kind === "word");
-    this.pronunciationText.textContent = query.selection.kind === "word" ? "英音：未查询" : "";
+    const pronunciationVisible = query.selection.kind === "word"
+      && settings.pronunciation.provider !== "off";
+    this.pronunciationRow.classList.toggle("visible", pronunciationVisible);
+    if (pronunciationVisible && settings.pronunciation.provider === "mimo") {
+      this.pronunciationText.textContent = `MiMo TTS · ${settings.pronunciation.mimo.voice} · 英式风格`;
+      this.pronunciationButton.textContent = "🔊 MiMo";
+    } else if (pronunciationVisible) {
+      this.pronunciationText.textContent = "有道词典 · 英音";
+      this.pronunciationButton.textContent = "🔊 英音";
+    } else {
+      this.pronunciationText.textContent = "";
+    }
     this.position();
     requestAnimationFrame(() => this.position());
   }
@@ -295,11 +305,6 @@ export class FloatingCard {
     }
   }
 
-  async preloadPronunciation(): Promise<void> {
-    if (this.lastQuery?.selection.kind !== "word") return;
-    await this.fetchAndPlayPronunciation(false);
-  }
-
   private async playPronunciation(): Promise<void> {
     await this.fetchAndPlayPronunciation(true);
   }
@@ -314,7 +319,9 @@ export class FloatingCard {
         this.pronunciationText.textContent = result.message ?? "发音不可用";
         return;
       }
-      this.pronunciationText.textContent = result.phonetic ? `英式 / ${result.phonetic} /` : "英式发音";
+      this.pronunciationText.textContent = result.phonetic
+        ? `英式 / ${result.phonetic} /${result.label ? " · " + result.label : ""}`
+        : result.label ?? "英式发音";
       if (play && result.audioDataUrl) {
         await new Audio(result.audioDataUrl).play();
       } else if (play && !result.audioDataUrl) {

@@ -101,9 +101,6 @@ function runLookup(): void {
   card.show(query, anchor, settings, prompt.id);
   startLookup(query, prompt.id);
 
-  if (classified.kind === "word" && settings.pronunciation.youdao.enabled) {
-    void card.preloadPronunciation();
-  }
 }
 
 function startLookup(query: CardQuery, promptId?: string): void {
