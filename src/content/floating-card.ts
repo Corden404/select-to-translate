@@ -1,4 +1,8 @@
-import type { PronunciationResponse, SpeechActionResponse } from "../shared/messages";
+import type {
+  PronunciationResponse,
+  SpeechActionResponse,
+  SpeechLatencyReport
+} from "../shared/messages";
 import {
   publicPromptsForKind,
   type PublicLookupSettings,
@@ -45,6 +49,9 @@ export class FloatingCard {
   private chatMessages: HTMLDivElement;
   private chatInput: HTMLTextAreaElement;
   private sendButton: HTMLButtonElement;
+  private latencyDetails: HTMLDetailsElement;
+  private latencySummary: HTMLElement;
+  private latencyBody: HTMLDivElement;
   private anchor: AnchorPoint | null = null;
   private lastQuery: CardQuery | null = null;
   private publicSettings: PublicLookupSettings | null = null;
@@ -107,6 +114,10 @@ export class FloatingCard {
         .context { margin-top:11px; padding-top:9px; border-top:1px solid var(--border); color:var(--muted); font-size:.78em; white-space:pre-wrap; overflow-wrap:anywhere; }
         .toolbar { display:flex; align-items:center; gap:7px; margin-top:11px; flex-wrap:wrap; }
         .speech-replay { display:none; } .speech-replay.visible { display:inline-block; }
+        .latency { display:none; margin-top:9px; padding-top:8px; border-top:1px dashed var(--border); color:var(--muted); font-size:.76em; }
+        .latency.visible { display:block; }
+        .latency summary { cursor:pointer; color:var(--text); }
+        .latency-body { margin-top:5px; white-space:pre-wrap; line-height:1.55; }
         .prompt { min-width:140px; max-width:210px; padding:5px 7px; border:1px solid var(--border); border-radius:8px; background:var(--bg-soft); color:var(--text); }
         .chat { display:none; margin-top:12px; padding-top:10px; border-top:1px solid var(--border); }
         .chat.visible { display:block; }
@@ -137,6 +148,7 @@ export class FloatingCard {
           <button class="follow-up" type="button" disabled>继续追问</button>
           <button class="speech-replay" type="button" disabled>🔁 重听讲解</button>
         </div>
+        <details class="latency"><summary>语音延迟分析</summary><div class="latency-body"></div></details>
         <div class="chat">
           <div class="messages"></div>
           <div class="composer">
@@ -162,6 +174,9 @@ export class FloatingCard {
     this.chatMessages = this.shadow.querySelector(".messages") as HTMLDivElement;
     this.chatInput = this.shadow.querySelector(".chat-input") as HTMLTextAreaElement;
     this.sendButton = this.shadow.querySelector(".send") as HTMLButtonElement;
+    this.latencyDetails = this.shadow.querySelector(".latency") as HTMLDetailsElement;
+    this.latencySummary = this.latencyDetails.querySelector("summary") as HTMLElement;
+    this.latencyBody = this.shadow.querySelector(".latency-body") as HTMLDivElement;
 
     this.shadow.querySelector(".close")?.addEventListener("click", () => {
       this.setPinned(false);
@@ -244,6 +259,10 @@ export class FloatingCard {
     const speechReplayVisible = query.selection.kind === "word" && settings.speechExplanation.enabled;
     this.speechReplayButton.classList.toggle("visible", speechReplayVisible);
     this.speechReplayButton.disabled = true;
+    this.latencyDetails.classList.remove("visible");
+    this.latencyDetails.open = false;
+    this.latencySummary.textContent = "语音延迟分析";
+    this.latencyBody.textContent = "";
     const pronunciationVisible = query.selection.kind === "word"
       && settings.pronunciation.provider !== "off";
     this.pronunciationRow.classList.toggle("visible", pronunciationVisible);
@@ -338,6 +357,53 @@ export class FloatingCard {
   setSpeechReplayReady(ready: boolean): void {
     if (!this.speechReplayButton.classList.contains("visible")) return;
     this.speechReplayButton.disabled = !ready;
+  }
+
+  setSpeechLatency(report: SpeechLatencyReport): void {
+    const localMs = report.audioStartMs;
+    const stages = [
+      { label: "触发/后台准备", value: report.triggerToWorkerMs + report.workerPrepMs },
+      { label: "语音 LLM", value: report.llmTotalMs },
+      { label: "MiMo TTS 首 chunk", value: report.ttsFirstChunkMs },
+      { label: "首 chunk→播放", value: localMs }
+    ];
+    const bottleneck = stages.reduce((largest, stage) => stage.value > largest.value ? stage : largest);
+    const ttsStages = [
+      { label: "等待响应头", value: report.ttsHeadersMs },
+      { label: "响应头→首音频 chunk", value: report.ttsFirstAudioAfterHeadersMs }
+    ];
+    const ttsBottleneck = ttsStages.reduce((largest, stage) => stage.value > largest.value ? stage : largest);
+    const seconds = (ms: number) => `${(ms / 1000).toFixed(ms >= 1000 ? 2 : 3)}s`;
+    const bytes = (value: number) => value >= 1024 * 1024
+      ? `${(value / 1024 / 1024).toFixed(2)} MB`
+      : `${(value / 1024).toFixed(1)} KB`;
+    const bottleneckText = bottleneck.label === "MiMo TTS 首 chunk"
+      ? `${bottleneck.label} ${seconds(bottleneck.value)}（${ttsBottleneck.label} ${seconds(ttsBottleneck.value)}）`
+      : `${bottleneck.label} ${seconds(bottleneck.value)}`;
+
+    this.latencySummary.textContent = `语音延迟 ${seconds(report.totalMs)} · 瓶颈：${bottleneckText}`;
+    this.latencyBody.textContent = [
+      `选词→后台：${seconds(report.triggerToWorkerMs)}`,
+      `后台准备：${seconds(report.workerPrepMs)}`,
+      `LLM 首 token：${seconds(report.llmTtftMs)}`,
+      `LLM 后续生成：${seconds(report.llmGenerationMs)}`,
+      `LLM 总计：${seconds(report.llmTotalMs)}`,
+      `MiMo TTS 首 chunk：${seconds(report.ttsFirstChunkMs)}`,
+      `  ↳ 等待响应头：${seconds(report.ttsHeadersMs)}`,
+      `  ↳ 响应头→首音频 chunk：${seconds(report.ttsFirstAudioAfterHeadersMs)}`,
+      `TTS 首 chunk 后剩余流：${seconds(report.ttsRemainingStreamMs)}`,
+      `TTS 完整流：${seconds(report.ttsMs)}`,
+      `SSE/JSON 解析累计：${seconds(report.ttsParseMs)}`,
+      `音频 chunk 数：${report.ttsChunkCount}`,
+      `语音稿长度：${report.speechChars} 字符`,
+      `流式响应体：${bytes(report.ttsResponseBytes)}`,
+      `PCM 音频数据：${bytes(report.audioBytes)}`,
+      `offscreen 准备：${seconds(report.offscreenReadyMs)}`,
+      `播放器首音：${seconds(report.audioStartMs)}`,
+      `总首音延迟：${seconds(report.totalMs)}`
+    ].join("\n");
+    this.latencyDetails.classList.add("visible");
+    this.position();
   }
 
   private async replaySpeechExplanation(): Promise<void> {

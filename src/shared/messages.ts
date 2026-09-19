@@ -28,6 +28,27 @@ export interface LookupRequestPayload {
   sourceType?: "web" | "pdf";
 }
 
+export interface SpeechLatencyReport {
+  triggerToWorkerMs: number;
+  workerPrepMs: number;
+  llmTtftMs: number;
+  llmGenerationMs: number;
+  llmTotalMs: number;
+  ttsMs: number;
+  ttsHeadersMs: number;
+  ttsFirstAudioAfterHeadersMs: number;
+  ttsFirstChunkMs: number;
+  ttsRemainingStreamMs: number;
+  ttsParseMs: number;
+  ttsChunkCount: number;
+  speechChars: number;
+  ttsResponseBytes: number;
+  audioBytes: number;
+  offscreenReadyMs: number;
+  audioStartMs: number;
+  totalMs: number;
+}
+
 export interface PublicSettingsResponse {
   ok: boolean;
   enabled: boolean;
@@ -91,6 +112,7 @@ export type LookupPortRequest =
       type: "LOOKUP_START";
       requestId: string;
       promptId?: string;
+      triggeredAt: number;
       payload: LookupRequestPayload;
     }
   | {
@@ -104,6 +126,7 @@ export type LookupPortResponse =
   | { type: "LOOKUP_CHUNK"; requestId: string; text: string }
   | { type: "LOOKUP_DONE"; requestId: string }
   | { type: "SPEECH_READY"; requestId: string }
+  | { type: "SPEECH_TIMING"; requestId: string; report: SpeechLatencyReport }
   | { type: "CHAT_STARTED"; requestId: string }
   | { type: "CHAT_CHUNK"; requestId: string; text: string }
   | { type: "CHAT_DONE"; requestId: string }
@@ -191,6 +214,9 @@ export function isLookupPortRequest(message: unknown): message is LookupPortRequ
   return typeof candidate.requestId === "string"
     && candidate.requestId.length > 0
     && candidate.requestId.length <= LOOKUP_PROTOCOL_LIMITS.requestId
+    && typeof candidate.triggeredAt === "number"
+    && Number.isFinite(candidate.triggeredAt)
+    && candidate.triggeredAt > 0
     && (!candidate.promptId || (
       typeof candidate.promptId === "string"
       && candidate.promptId.length <= LOOKUP_PROTOCOL_LIMITS.promptId

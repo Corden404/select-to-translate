@@ -1,7 +1,7 @@
 import { putHistoryRecord } from "../history/db";
 import type { LookupHistoryRecord } from "../history/types";
 import { streamOpenAiCompatible, testOpenAiCompatibleConnection } from "../llm/openai-compatible";
-import { getMiMoExplanationSpeech, getMiMoPronunciation } from "../pronunciation/mimo";
+import { getMiMoPronunciation, streamMiMoExplanationSpeech } from "../pronunciation/mimo";
 import { getYoudaoPronunciation } from "../pronunciation/youdao";
 import type {
   ConnectionTestResponse,
@@ -11,7 +11,8 @@ import type {
   OneShotMessage,
   PronunciationResponse,
   PublicSettingsResponse,
-  SpeechActionResponse
+  SpeechActionResponse,
+  SpeechLatencyReport
 } from "../shared/messages";
 import {
   isLookupPortRequest,
@@ -38,7 +39,6 @@ interface SpeechSession {
 
 interface ReplayableSpeech {
   requestId: string;
-  audioDataUrl: string;
   playbackRate: number;
 }
 
@@ -105,7 +105,11 @@ async function startSpeechExplanation(
   requestId: string,
   payload: LookupRequestPayload,
   settings: Awaited<ReturnType<typeof loadLookupSettings>>,
-  onReady?: () => void
+  triggeredAt: number,
+  workerReceivedAt: number,
+  workerReceivedPerf: number,
+  onReady?: () => void,
+  onTiming?: (report: SpeechLatencyReport) => void
 ): Promise<void> {
   const previous = activeSpeechSession;
   if (requestId !== latestSpeechLookupRequestId || cancelledSpeechRequestIds.has(requestId)) return;
@@ -122,6 +126,8 @@ async function startSpeechExplanation(
   await stopOffscreenAudio();
   if (activeSpeechSession !== session || session.scriptController.signal.aborted) return;
 
+  const llmStartedAt = performance.now();
+  let llmFirstTokenAt: number | null = null;
   let script = "";
   try {
     await streamOpenAiCompatible(
@@ -136,11 +142,13 @@ async function startSpeechExplanation(
       text => {
         if (activeSpeechSession === session && !session.scriptController.signal.aborted) {
           script += text;
+          if (llmFirstTokenAt === null) llmFirstTokenAt = performance.now();
         }
       }
     );
 
     if (activeSpeechSession !== session || session.scriptController.signal.aborted) return;
+    const llmCompletedAt = performance.now();
     const speechText = cleanSpeechScript(script);
     if (!speechText) throw new Error("语音讲解模型没有返回可朗读的内容。");
 
@@ -148,27 +156,98 @@ async function startSpeechExplanation(
     session.ttsController = ttsController;
     const mimoApiKey = settings.pronunciation.mimo.apiKey
       || (settings.api.provider === "mimo" ? settings.api.apiKey : "");
-    const result = await getMiMoExplanationSpeech(speechText, {
-      ...settings.pronunciation.mimo,
-      apiKey: mimoApiKey,
-      style: settings.speechExplanation.ttsStyle
-    }, ttsController.signal);
 
-    if (activeSpeechSession !== session || ttsController.signal.aborted || !result.audioDataUrl) return;
+    const offscreenStartedAt = performance.now();
+    let offscreenReadyAt = offscreenStartedAt;
+    const streamStartPromise = (async () => {
+      await ensureOffscreenDocument();
+      const response = await chrome.runtime.sendMessage({
+        target: "offscreen-audio",
+        type: "STREAM_START",
+        requestId,
+        playbackRate: settings.speechExplanation.playbackRate
+      }) as SpeechActionResponse | undefined;
+      if (!response?.ok) throw new Error(response?.message ?? "无法启动流式音频播放器。");
+      offscreenReadyAt = performance.now();
+    })();
+
+    let firstChunkReceivedAt: number | null = null;
+    let firstPlaybackAt: number | null = null;
+    let firstPlaybackEpoch: number | null = null;
+    let chunkSendChain = Promise.resolve();
+    let chunkSendError: unknown = null;
+
+    const result = await streamMiMoExplanationSpeech(
+      speechText,
+      {
+        ...settings.pronunciation.mimo,
+        apiKey: mimoApiKey,
+        style: settings.speechExplanation.ttsStyle
+      },
+      audioBase64 => {
+        const receivedAt = performance.now();
+        if (firstChunkReceivedAt === null) firstChunkReceivedAt = receivedAt;
+        chunkSendChain = chunkSendChain.then(async () => {
+          if (chunkSendError) return;
+          await streamStartPromise;
+          if (activeSpeechSession !== session || ttsController.signal.aborted) return;
+          const response = await chrome.runtime.sendMessage({
+            target: "offscreen-audio",
+            type: "STREAM_CHUNK",
+            requestId,
+            audioBase64
+          }) as (SpeechActionResponse & { started?: boolean }) | undefined;
+          if (!response?.ok) throw new Error(response?.message ?? "流式音频播放失败。");
+          if (response.started && firstPlaybackAt === null) {
+            firstPlaybackAt = performance.now();
+            firstPlaybackEpoch = Date.now();
+          }
+        }).catch(error => {
+          if (!chunkSendError) chunkSendError = error;
+        });
+      },
+      ttsController.signal
+    );
+
+    await chunkSendChain;
+    if (chunkSendError) throw chunkSendError;
+    await streamStartPromise;
+    if (activeSpeechSession !== session || ttsController.signal.aborted) return;
+    const endResponse = await chrome.runtime.sendMessage({
+      target: "offscreen-audio",
+      type: "STREAM_END",
+      requestId
+    }) as SpeechActionResponse | undefined;
+    if (!endResponse?.ok) throw new Error(endResponse?.message ?? "流式音频结束失败。");
+
     replayableSpeech = {
       requestId,
-      audioDataUrl: result.audioDataUrl,
       playbackRate: settings.speechExplanation.playbackRate
     };
     onReady?.();
-    await ensureOffscreenDocument();
-    if (activeSpeechSession !== session || ttsController.signal.aborted) return;
-    await chrome.runtime.sendMessage({
-      target: "offscreen-audio",
-      type: "PLAY_AUDIO",
-      requestId,
-      audioDataUrl: result.audioDataUrl,
-      playbackRate: settings.speechExplanation.playbackRate,
+
+    const firstTokenAt = llmFirstTokenAt ?? llmCompletedAt;
+    const firstChunkAt = firstChunkReceivedAt ?? performance.now();
+    const playbackAt = firstPlaybackAt ?? firstChunkAt;
+    onTiming?.({
+      triggerToWorkerMs: Math.max(0, workerReceivedAt - triggeredAt),
+      workerPrepMs: Math.max(0, llmStartedAt - workerReceivedPerf),
+      llmTtftMs: Math.max(0, firstTokenAt - llmStartedAt),
+      llmGenerationMs: Math.max(0, llmCompletedAt - firstTokenAt),
+      llmTotalMs: Math.max(0, llmCompletedAt - llmStartedAt),
+      ttsMs: result.totalMs,
+      ttsHeadersMs: result.headersMs,
+      ttsFirstAudioAfterHeadersMs: result.firstAudioAfterHeadersMs,
+      ttsFirstChunkMs: result.headersMs + result.firstAudioAfterHeadersMs,
+      ttsRemainingStreamMs: result.remainingStreamMs,
+      ttsParseMs: result.parseMs,
+      ttsChunkCount: result.chunkCount,
+      speechChars: result.inputChars,
+      ttsResponseBytes: result.responseBytes,
+      audioBytes: result.audioBytes,
+      offscreenReadyMs: Math.max(0, offscreenReadyAt - offscreenStartedAt),
+      audioStartMs: Math.max(0, playbackAt - firstChunkAt),
+      totalMs: Math.max(0, (firstPlaybackEpoch ?? Date.now()) - triggeredAt)
     });
   } catch (error) {
     if (activeSpeechSession !== session
@@ -176,6 +255,8 @@ async function startSpeechExplanation(
       || session.ttsController?.signal.aborted) {
       return;
     }
+    if (replayableSpeech?.requestId === requestId) replayableSpeech = null;
+    await stopOffscreenAudio(requestId);
     activeSpeechSession = null;
     console.warn("自动语音解释失败：", error);
   }
@@ -422,6 +503,8 @@ chrome.runtime.onConnect.addListener(port => {
   }
 
   port.onMessage.addListener((message: unknown) => {
+    const workerReceivedAt = Date.now();
+    const workerReceivedPerf = performance.now();
     const rawType = message && typeof message === "object"
       ? (message as { type?: unknown }).type
       : undefined;
@@ -477,7 +560,11 @@ chrome.runtime.onConnect.addListener(port => {
             message.requestId,
             message.payload,
             settings,
-            () => safePost({ type: "SPEECH_READY", requestId: message.requestId })
+            message.triggeredAt,
+            workerReceivedAt,
+            workerReceivedPerf,
+            () => safePost({ type: "SPEECH_READY", requestId: message.requestId }),
+            report => safePost({ type: "SPEECH_TIMING", requestId: message.requestId, report })
           );
         }
         const built = buildLookupMessages(settings, message.payload, message.promptId);
@@ -585,21 +672,19 @@ chrome.runtime.onMessage.addListener((
       try {
         if (replayableSpeech?.requestId === message.requestId) {
           await ensureOffscreenDocument();
-          await chrome.runtime.sendMessage({
+          const result = await chrome.runtime.sendMessage({
             target: "offscreen-audio",
-            type: "PLAY_AUDIO",
-            requestId: message.requestId,
-            audioDataUrl: replayableSpeech.audioDataUrl,
-            playbackRate: replayableSpeech.playbackRate,
-          });
-          sendResponse({ ok: true });
+            type: "REPLAY_STREAM",
+            requestId: message.requestId
+          }) as SpeechActionResponse | undefined;
+          sendResponse(result?.ok ? result : { ok: false, message: "当前语音解释已不可重听。" });
           return;
         }
 
         if (await chrome.offscreen.hasDocument()) {
           const result = await chrome.runtime.sendMessage({
             target: "offscreen-audio",
-            type: "REPLAY_AUDIO",
+            type: "REPLAY_STREAM",
             requestId: message.requestId
           }) as SpeechActionResponse | undefined;
           sendResponse(result?.ok ? result : { ok: false, message: "当前语音解释已不可重听。" });

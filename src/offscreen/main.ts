@@ -2,59 +2,123 @@ interface OffscreenAudioMessage {
   target?: string;
   type?: string;
   requestId?: string;
-  audioDataUrl?: string;
+  audioBase64?: string;
   playbackRate?: number;
 }
 
 interface AudioActionResponse {
   ok: boolean;
   message?: string;
+  started?: boolean;
 }
 
-let currentAudio: HTMLAudioElement | null = null;
-let currentRequestId = "";
-let lastAudioDataUrl = "";
-let lastRequestId = "";
-let lastPlaybackRate = 1;
+const PCM_SAMPLE_RATE = 24000;
+const START_BUFFER_SECONDS = 0.03;
 
-function stopCurrentAudio(): void {
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio.removeAttribute("src");
-    currentAudio.load();
+let audioContext: AudioContext | null = null;
+let currentRequestId = "";
+let currentPlaybackRate = 1;
+let nextStartTime = 0;
+let firstChunkScheduled = false;
+let streamComplete = false;
+let replayRequestId = "";
+let replayPlaybackRate = 1;
+let replayChunks: string[] = [];
+const activeSources = new Set<AudioBufferSourceNode>();
+
+function normalizedRate(value: number | undefined): number {
+  return Number.isFinite(value) ? Math.min(2, Math.max(0.5, value!)) : 1;
+}
+
+async function ensureAudioContext(): Promise<AudioContext> {
+  if (!audioContext || audioContext.state === "closed") {
+    audioContext = new AudioContext({ sampleRate: PCM_SAMPLE_RATE });
   }
-  currentAudio = null;
+  if (audioContext.state === "suspended") await audioContext.resume();
+  return audioContext;
+}
+
+function stopSources(): void {
+  for (const source of activeSources) {
+    try { source.stop(); } catch { /* already stopped */ }
+  }
+  activeSources.clear();
   currentRequestId = "";
+  nextStartTime = 0;
+  firstChunkScheduled = false;
 }
 
 function clearReplayCache(requestId?: string): void {
-  if (requestId && requestId !== lastRequestId) return;
-  lastAudioDataUrl = "";
-  lastRequestId = "";
-  lastPlaybackRate = 1;
+  if (requestId && requestId !== replayRequestId) return;
+  replayRequestId = "";
+  replayPlaybackRate = 1;
+  replayChunks = [];
+  streamComplete = false;
 }
 
-function playAudio(audioDataUrl: string, requestId: string, playbackRate = 1): void {
-  stopCurrentAudio();
-  const normalizedRate = Number.isFinite(playbackRate)
-    ? Math.min(2, Math.max(0.5, playbackRate))
-    : 1;
-  lastAudioDataUrl = audioDataUrl;
-  lastRequestId = requestId;
-  lastPlaybackRate = normalizedRate;
-  const audio = new Audio(audioDataUrl);
-  audio.playbackRate = normalizedRate;
-  audio.preservesPitch = true;
-  currentAudio = audio;
+function decodePcm16(audioBase64: string): Float32Array {
+  const binary = atob(audioBase64);
+  const sampleCount = Math.floor(binary.length / 2);
+  const pcm = new Float32Array(sampleCount);
+  for (let index = 0; index < sampleCount; index += 1) {
+    const low = binary.charCodeAt(index * 2);
+    const high = binary.charCodeAt(index * 2 + 1);
+    let sample = (high << 8) | low;
+    if (sample >= 0x8000) sample -= 0x10000;
+    pcm[index] = sample / 32768;
+  }
+  return pcm;
+}
+
+async function queuePcmChunk(
+  audioBase64: string,
+  requestId: string,
+  playbackRate: number,
+  cacheForReplay: boolean
+): Promise<boolean> {
+  const context = await ensureAudioContext();
+  if (requestId !== currentRequestId) throw new Error("语音流已经被新的请求替换。");
+
+  const pcm = decodePcm16(audioBase64);
+  if (pcm.length === 0) return false;
+  const buffer = context.createBuffer(1, pcm.length, PCM_SAMPLE_RATE);
+  buffer.getChannelData(0).set(pcm);
+
+  const source = context.createBufferSource();
+  source.buffer = buffer;
+  source.playbackRate.value = playbackRate;
+  source.connect(context.destination);
+  activeSources.add(source);
+  source.addEventListener("ended", () => activeSources.delete(source), { once: true });
+
+  const now = context.currentTime;
+  const startAt = firstChunkScheduled
+    ? Math.max(nextStartTime, now + 0.005)
+    : now + START_BUFFER_SECONDS;
+  source.start(startAt);
+  nextStartTime = startAt + buffer.duration / playbackRate;
+
+  if (cacheForReplay) replayChunks.push(audioBase64);
+  if (firstChunkScheduled) return false;
+
+  firstChunkScheduled = true;
+  const waitMs = Math.max(0, (startAt - context.currentTime) * 1000);
+  if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+  return true;
+}
+
+async function replayCachedStream(requestId: string): Promise<void> {
+  if (requestId !== replayRequestId || replayChunks.length === 0 || !streamComplete) {
+    throw new Error("当前语音解释已不可重听。");
+  }
+  stopSources();
   currentRequestId = requestId;
-  const clearIfCurrent = () => {
-    if (currentAudio !== audio) return;
-    currentAudio = null;
-    currentRequestId = "";
-  };
-  audio.addEventListener("ended", clearIfCurrent, { once: true });
-  audio.addEventListener("error", clearIfCurrent, { once: true });
-  void audio.play().catch(clearIfCurrent);
+  currentPlaybackRate = replayPlaybackRate;
+  nextStartTime = 0;
+  firstChunkScheduled = false;
+  for (const chunk of replayChunks) {
+    await queuePcmChunk(chunk, requestId, currentPlaybackRate, false);
+  }
 }
 
 chrome.runtime.onMessage.addListener((
@@ -65,32 +129,57 @@ chrome.runtime.onMessage.addListener((
   if (!message || message.target !== "offscreen-audio") return false;
 
   if (message.type === "STOP_AUDIO") {
-    if (!message.requestId || message.requestId === currentRequestId || message.requestId === lastRequestId) {
-      stopCurrentAudio();
+    if (!message.requestId || message.requestId === currentRequestId || message.requestId === replayRequestId) {
+      stopSources();
       clearReplayCache(message.requestId);
     }
     sendResponse({ ok: true });
     return false;
   }
 
-  if (message.type === "REPLAY_AUDIO") {
-    if (!message.requestId || message.requestId !== lastRequestId || !lastAudioDataUrl) {
-      sendResponse({ ok: false, message: "当前语音解释已不可重听。" });
-      return false;
-    }
-    playAudio(lastAudioDataUrl, lastRequestId, lastPlaybackRate);
+  if (message.type === "STREAM_START" && typeof message.requestId === "string") {
+    stopSources();
+    clearReplayCache();
+    currentRequestId = message.requestId;
+    currentPlaybackRate = normalizedRate(message.playbackRate);
+    replayRequestId = message.requestId;
+    replayPlaybackRate = currentPlaybackRate;
+    streamComplete = false;
+    void ensureAudioContext()
+      .then(() => sendResponse({ ok: true }))
+      .catch(error => sendResponse({
+        ok: false,
+        message: error instanceof Error ? error.message : "无法启动流式音频播放器。"
+      }));
+    return true;
+  }
+
+  if (message.type === "STREAM_CHUNK"
+    && typeof message.requestId === "string"
+    && typeof message.audioBase64 === "string") {
+    void queuePcmChunk(message.audioBase64, message.requestId, currentPlaybackRate, true)
+      .then(started => sendResponse({ ok: true, started }))
+      .catch(error => sendResponse({
+        ok: false,
+        message: error instanceof Error ? error.message : "流式音频播放失败。"
+      }));
+    return true;
+  }
+
+  if (message.type === "STREAM_END" && typeof message.requestId === "string") {
+    if (message.requestId === replayRequestId) streamComplete = true;
     sendResponse({ ok: true });
     return false;
   }
 
-  if (message.type === "PLAY_AUDIO" && typeof message.audioDataUrl === "string") {
-    playAudio(
-      message.audioDataUrl,
-      typeof message.requestId === "string" ? message.requestId : "",
-      typeof message.playbackRate === "number" ? message.playbackRate : 1
-    );
-    sendResponse({ ok: true });
-    return false;
+  if (message.type === "REPLAY_STREAM" && typeof message.requestId === "string") {
+    void replayCachedStream(message.requestId)
+      .then(() => sendResponse({ ok: true }))
+      .catch(error => sendResponse({
+        ok: false,
+        message: error instanceof Error ? error.message : "重听语音解释失败。"
+      }));
+    return true;
   }
 
   return false;

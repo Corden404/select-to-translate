@@ -22,6 +22,7 @@ import {
 
 let enabled = true;
 let scheduled: number | null = null;
+let scheduledTriggeredAt = 0;
 let lastFingerprint = "";
 let suppressLookupUntil = 0;
 let activePort: chrome.runtime.Port | null = null;
@@ -82,6 +83,7 @@ function cancelActiveRequest(): void {
 function scheduleLookup(event?: Event): void {
   if (!enabled) return;
   if (event && card.containsEvent(event)) return;
+  scheduledTriggeredAt = Date.now();
   if (scheduled !== null) window.clearTimeout(scheduled);
   scheduled = window.setTimeout(runLookup, 70);
 }
@@ -100,6 +102,8 @@ function getSourceMetadata(): {
 }
 
 function runLookup(): void {
+  const triggeredAt = scheduledTriggeredAt || Date.now();
+  scheduledTriggeredAt = 0;
   scheduled = null;
   if (!enabled) return;
   if (performance.now() < suppressLookupUntil) return;
@@ -129,11 +133,11 @@ function runLookup(): void {
   const query: CardQuery = { selection: classified, context, sentenceContext };
   const prompt = resolvePublicPrompt(settings, classified.kind);
   card.show(query, anchor, settings, prompt.id);
-  startLookup(query, prompt.id);
+  startLookup(query, prompt.id, triggeredAt);
 
 }
 
-function startLookup(query: CardQuery, promptId?: string): void {
+function startLookup(query: CardQuery, promptId?: string, triggeredAt = Date.now()): void {
   cancelActiveRequest();
 
   const requestId = crypto.randomUUID();
@@ -169,6 +173,9 @@ function startLookup(query: CardQuery, promptId?: string): void {
       case "SPEECH_READY":
         card.setSpeechReplayReady(true);
         break;
+      case "SPEECH_TIMING":
+        card.setSpeechLatency(message.report);
+        break;
       case "CHAT_STARTED":
         card.chatStarted();
         break;
@@ -198,6 +205,7 @@ function startLookup(query: CardQuery, promptId?: string): void {
     type: "LOOKUP_START",
     requestId,
     promptId,
+    triggeredAt,
     payload
   });
 }

@@ -38,6 +38,7 @@ describe("lookup message protocol", () => {
     expect(isLookupPortRequest({
       type: "LOOKUP_START",
       requestId: "request-1",
+      triggeredAt: Date.now(),
       payload
     })).toBe(true);
   });
@@ -46,6 +47,7 @@ describe("lookup message protocol", () => {
     const invalidLookup = {
       type: "LOOKUP_START",
       requestId: "request-2",
+      triggeredAt: Date.now(),
       payload: {
         ...basePayload,
         pageTitle: "x".repeat(LOOKUP_PROTOCOL_LIMITS.pageTitle + 1)
@@ -53,6 +55,13 @@ describe("lookup message protocol", () => {
     };
     expect(isLookupPortRequest(invalidLookup)).toBe(false);
     expect(recoverLookupRequestId(invalidLookup)).toBe("request-2");
+
+    expect(isLookupPortRequest({
+      type: "LOOKUP_START",
+      requestId: "request-invalid-time",
+      triggeredAt: Number.NaN,
+      payload: basePayload
+    })).toBe(false);
 
     const invalidChat = {
       type: "CHAT_SEND",
