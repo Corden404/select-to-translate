@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Selection Lookup",
-  "version": "0.1.0",
-  "description": "Fast context-aware English lookup for selected text.",
+  "name": "右键查词工具",
+  "version": "0.2.0",
+  "description": "选中英文单词或句子后，结合上下文调用大模型进行快速解释。",
   "permissions": ["storage"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
@@ -10,14 +10,15 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Toggle automatic lookup"
+    "default_title": "右键查词工具",
+    "default_popup": "popup.html"
   },
   "commands": {
     "toggle-auto-lookup": {
       "suggested_key": {
         "default": "Alt+Shift+L"
       },
-      "description": "Toggle automatic lookup"
+      "description": "开启或关闭自动查词"
     }
   },
   "content_scripts": [
