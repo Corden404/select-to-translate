@@ -75,7 +75,7 @@ export class FloatingCard {
     this.host.style.pointerEvents = "none";
     this.host.style.display = "none";
 
-    this.shadow = this.host.attachShadow({ mode: "open" });
+    this.shadow = this.host.attachShadow({ mode: "closed" });
     this.shadow.innerHTML = `
       <style>
         :host { all: initial; }
@@ -178,30 +178,50 @@ export class FloatingCard {
     this.latencySummary = this.latencyDetails.querySelector("summary") as HTMLElement;
     this.latencyBody = this.shadow.querySelector(".latency-body") as HTMLDivElement;
 
-    this.shadow.querySelector(".close")?.addEventListener("click", () => {
+    this.shadow.querySelector(".close")?.addEventListener("click", event => {
+      if (!event.isTrusted) return;
       this.setPinned(false);
       this.hide();
     });
-    this.pinButton.addEventListener("click", () => this.setPinned(!this.pinned));
-    this.shadow.querySelector(".regenerate")?.addEventListener("click", () => {
+    this.pinButton.addEventListener("click", event => {
+      if (!event.isTrusted) return;
+      this.setPinned(!this.pinned);
+    });
+    this.shadow.querySelector(".regenerate")?.addEventListener("click", event => {
+      if (!event.isTrusted) return;
       if (this.lastQuery) this.callbacks.onRegenerate?.(this.lastQuery, this.promptSelect.value);
     });
-    this.promptSelect.addEventListener("change", () => {
+    this.promptSelect.addEventListener("change", event => {
+      if (!event.isTrusted) return;
       if (this.lastQuery) this.callbacks.onPromptChange?.(this.lastQuery, this.promptSelect.value);
     });
-    this.kindSelect.addEventListener("change", () => {
+    this.kindSelect.addEventListener("change", event => {
+      if (!event.isTrusted) return;
       this.changeKind(this.kindSelect.value as SelectionKind);
     });
-    this.followUpButton.addEventListener("click", () => this.openChat());
-    this.sendButton.addEventListener("click", () => this.submitFollowUp());
+    this.followUpButton.addEventListener("click", event => {
+      if (!event.isTrusted) return;
+      this.openChat();
+    });
+    this.sendButton.addEventListener("click", event => {
+      if (!event.isTrusted) return;
+      this.submitFollowUp();
+    });
     this.chatInput.addEventListener("keydown", event => {
+      if (!event.isTrusted) return;
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         this.submitFollowUp();
       }
     });
-    this.pronunciationButton.addEventListener("click", () => void this.playPronunciation());
-    this.speechReplayButton.addEventListener("click", () => void this.replaySpeechExplanation());
+    this.pronunciationButton.addEventListener("click", event => {
+      if (!event.isTrusted) return;
+      void this.playPronunciation();
+    });
+    this.speechReplayButton.addEventListener("click", event => {
+      if (!event.isTrusted) return;
+      void this.replaySpeechExplanation();
+    });
 
     this.darkMedia.addEventListener("change", () => {
       if (this.themePreference === "system") this.applyResolvedTheme();
@@ -270,8 +290,8 @@ export class FloatingCard {
       this.pronunciationText.textContent = `MiMo TTS · ${settings.pronunciation.mimo.voice} · 英式风格`;
       this.pronunciationButton.textContent = "🔊 MiMo";
     } else if (pronunciationVisible) {
-      this.pronunciationText.textContent = "有道词典 · 英音";
-      this.pronunciationButton.textContent = "🔊 英音";
+      this.pronunciationText.textContent = "有道词典 · 英式音标";
+      this.pronunciationButton.textContent = "查询音标";
     } else {
       this.pronunciationText.textContent = "";
     }
@@ -445,7 +465,7 @@ export class FloatingCard {
         : result.label ?? "英式发音";
       if (play && result.audioDataUrl) {
         await new Audio(result.audioDataUrl).play();
-      } else if (play && !result.audioDataUrl) {
+      } else if (play && !result.audioDataUrl && this.publicSettings?.pronunciation.provider === "mimo") {
         this.pronunciationText.textContent += " · 暂无音频";
       }
     } catch (error) {

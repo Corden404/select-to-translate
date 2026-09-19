@@ -34,6 +34,9 @@ const modelSuggestions=byId<HTMLDataListElement>("modelSuggestions");
 const timeout=byId<HTMLInputElement>("timeout");
 const theme=byId<HTMLSelectElement>("theme");
 const fontSize=byId<HTMLSelectElement>("fontSize");
+const historyEnabled=byId<HTMLInputElement>("historyEnabled");
+const historyRetentionDays=byId<HTMLSelectElement>("historyRetentionDays");
+const historyMaxEntries=byId<HTMLSelectElement>("historyMaxEntries");
 const promptSelect=byId<HTMLSelectElement>("promptSelect");
 const promptName=byId<HTMLInputElement>("promptName");
 const promptDescription=byId<HTMLInputElement>("promptDescription");
@@ -83,6 +86,28 @@ function selectedProvider():ProviderId{
   return value in PROVIDER_PRESETS?value:"custom";
 }
 
+function providerFormConfig(id:ProviderId){
+  const preset=PROVIDER_PRESETS[id];
+  return working.api.providerConfigs?.[id]??{
+    apiKey:working.api.providerApiKeys?.[id]??(id===working.api.provider?working.api.apiKey:""),
+    baseUrl:id===working.api.provider?working.api.baseUrl:preset.baseUrl,
+    model:id===working.api.provider?working.api.model:preset.defaultModel
+  };
+}
+
+function stashProviderForm(id:ProviderId):void{
+  const config={apiKey:apiKey.value.trim(),baseUrl:baseUrl.value.trim(),model:model.value.trim()};
+  working.api.providerConfigs={...(working.api.providerConfigs??{}),[id]:config};
+  working.api.providerApiKeys={...(working.api.providerApiKeys??{}),[id]:config.apiKey};
+}
+
+function loadProviderForm(id:ProviderId):void{
+  const config=providerFormConfig(id);
+  apiKey.value=config.apiKey;
+  baseUrl.value=config.baseUrl;
+  model.value=config.model;
+}
+
 function renderProviderDetails():void{
   const preset=PROVIDER_PRESETS[selectedProvider()];
   providerNote.textContent=preset.note;
@@ -110,8 +135,8 @@ function renderPronunciationSettings():void{
       :"默认使用 MiMo-V2.5-TTS；只有点击发音按钮时才会生成单词音频。")
     :selected==="youdao"
       ?(autoSpeechExplanation.checked
-        ?"单词发音使用有道；自动语音解释仍使用 MiMo TTS，因此 MiMo 配置会继续显示。"
-        :"使用有道智云词典的英式音标与英音，作为备用发音服务。")
+        ?"单词查询使用有道英式音标；自动语音解释仍使用 MiMo TTS，因此 MiMo 配置会继续显示。"
+        :"使用有道智云词典查询英式音标；不下载或播放有道音频。")
       :(autoSpeechExplanation.checked
         ?"手动单词发音已关闭；自动语音解释仍使用 MiMo TTS。"
         :"发音按钮将隐藏，不会向第三方语音服务发送文本。");
@@ -240,12 +265,13 @@ async function loadForm():Promise<void>{
   autoLookup.checked=stored[AUTO_LOOKUP_STORAGE_KEY]!==false;
   provider.value=working.api.provider;
   activeProvider=working.api.provider;
-  apiKey.value=working.api.providerApiKeys?.[activeProvider]??working.api.apiKey;
-  baseUrl.value=working.api.baseUrl;
-  model.value=working.api.model;
+  loadProviderForm(activeProvider);
   timeout.value=String(Math.round(working.api.timeoutMs/1000));
   theme.value=working.ui.theme;
   fontSize.value=working.ui.fontSize;
+  historyEnabled.checked=working.history.enabled;
+  historyRetentionDays.value=String(working.history.retentionDays);
+  historyMaxEntries.value=String(working.history.maxEntries);
   pronunciationProvider.value=working.pronunciation.provider;
   mimoTtsKey.value=working.pronunciation.mimo.apiKey;
   mimoTtsBaseUrl.value=working.pronunciation.mimo.baseUrl;
@@ -270,15 +296,9 @@ async function loadForm():Promise<void>{
 }
 
 provider.addEventListener("change",()=>{
-  working.api.providerApiKeys={
-    ...(working.api.providerApiKeys??{}),
-    [activeProvider]:apiKey.value.trim()
-  };
+  stashProviderForm(activeProvider);
   activeProvider=selectedProvider();
-  apiKey.value=working.api.providerApiKeys[activeProvider]??"";
-  const preset=PROVIDER_PRESETS[activeProvider];
-  baseUrl.value=preset.baseUrl;
-  model.value=preset.defaultModel;
+  loadProviderForm(activeProvider);
   renderProviderDetails();
 });
 theme.addEventListener("change",()=>applyPopupTheme(theme.value as UiTheme));
@@ -424,17 +444,22 @@ save.addEventListener("click",()=>{
     savePromptEditor();
     working.ui={theme:theme.value as UiTheme,fontSize:fontSize.value as UiFontSize};
     const selectedApiProvider=selectedProvider();
-    const providerApiKeys={
-      ...(working.api.providerApiKeys??{}),
-      [selectedApiProvider]:apiKey.value.trim()
+    stashProviderForm(selectedApiProvider);
+    const providerConfigs=working.api.providerConfigs??{};
+    const selectedConfig=providerConfigs[selectedApiProvider]??{
+      apiKey:"",baseUrl:baseUrl.value.trim(),model:model.value.trim()
     };
+    const providerApiKeys=Object.fromEntries(
+      Object.entries(providerConfigs).map(([id,config])=>[id,config?.apiKey??""])
+    ) as LookupSettings["api"]["providerApiKeys"];
     activeProvider=selectedApiProvider;
     working.api={
       provider:selectedApiProvider,
-      baseUrl:baseUrl.value.trim(),
-      apiKey:providerApiKeys[selectedApiProvider]??"",
+      baseUrl:selectedConfig.baseUrl,
+      apiKey:selectedConfig.apiKey,
+      providerConfigs,
       providerApiKeys,
-      model:model.value.trim(),
+      model:selectedConfig.model,
       timeoutMs:currentTimeoutMs()
     };
     working.pronunciation={
@@ -458,6 +483,11 @@ save.addEventListener("click",()=>{
       playbackRate:Number(speechPlaybackRate.value)||DEFAULT_SETTINGS.speechExplanation.playbackRate,
       prompt:speechExplanationPrompt.value.trim()||DEFAULT_SETTINGS.speechExplanation.prompt,
       ttsStyle:speechTtsStyle.value.trim()||DEFAULT_SETTINGS.speechExplanation.ttsStyle
+    };
+    working.history={
+      enabled:historyEnabled.checked,
+      retentionDays:Number(historyRetentionDays.value),
+      maxEntries:Number(historyMaxEntries.value)
     };
     working.prompts.defaultWordPromptId=defaultWordPrompt.value||working.prompts.defaultWordPromptId;
     working.prompts.defaultSentencePromptId=defaultSentencePrompt.value||working.prompts.defaultSentencePromptId;

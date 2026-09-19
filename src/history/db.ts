@@ -4,6 +4,11 @@ const DB_NAME = "selection-lookup";
 const DB_VERSION = 1;
 const STORE_NAME = "lookupRecords";
 
+export interface HistoryRetentionPolicy {
+  retentionDays: number;
+  maxEntries: number;
+}
+
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
@@ -48,8 +53,49 @@ async function withStore<T>(
   return result;
 }
 
-export async function putHistoryRecord(record: LookupHistoryRecord): Promise<void> {
+export async function putHistoryRecord(
+  record: LookupHistoryRecord,
+  retention?: HistoryRetentionPolicy
+): Promise<void> {
   await withStore("readwrite", store => store.put(record));
+  if (retention) await pruneHistory(retention);
+}
+
+export async function pruneHistory(retention: HistoryRetentionPolicy): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_NAME, "readwrite");
+  const index = tx.objectStore(STORE_NAME).index("createdAt");
+  const cutoff = retention.retentionDays > 0
+    ? Date.now() - retention.retentionDays * 24 * 60 * 60 * 1000
+    : Number.NEGATIVE_INFINITY;
+  let kept = 0;
+
+  await new Promise<void>((resolve, reject) => {
+    const request = index.openCursor(null, "prev");
+    request.onerror = () => reject(request.error ?? new Error("清理历史记录失败"));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+      const record = cursor.value as LookupHistoryRecord;
+      const expired = record.createdAt < cutoff;
+      const overLimit = kept >= retention.maxEntries;
+      if (expired || overLimit) {
+        cursor.delete();
+      } else {
+        kept += 1;
+      }
+      cursor.continue();
+    };
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error("清理历史记录事务失败"));
+    tx.onabort = () => reject(tx.error ?? new Error("清理历史记录事务被取消"));
+  });
 }
 
 export async function getHistoryRecord(id: string): Promise<LookupHistoryRecord | undefined> {

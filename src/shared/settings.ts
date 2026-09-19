@@ -17,6 +17,12 @@ export interface ProviderPreset {
   note: string;
 }
 
+export interface ProviderConnectionSettings {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+}
+
 export interface PromptMetadata {
   id: string;
   name: string;
@@ -57,6 +63,8 @@ export interface LookupSettings {
     provider: ProviderId;
     baseUrl: string;
     apiKey: string;
+    providerConfigs?: Partial<Record<ProviderId, ProviderConnectionSettings>>;
+    /** Legacy compatibility field. providerConfigs is authoritative for new saves. */
     providerApiKeys?: Partial<Record<ProviderId, string>>;
     model: string;
     timeoutMs: number;
@@ -72,6 +80,11 @@ export interface LookupSettings {
     playbackRate: number;
     prompt: string;
     ttsStyle: string;
+  };
+  history: {
+    enabled: boolean;
+    retentionDays: number;
+    maxEntries: number;
   };
   prompts: {
     items: PromptDefinition[];
@@ -249,6 +262,13 @@ export const DEFAULT_SETTINGS: LookupSettings = {
     provider: "deepseek",
     baseUrl: PROVIDER_PRESETS.deepseek.baseUrl,
     apiKey: "",
+    providerConfigs: {
+      deepseek: { apiKey: "", baseUrl: PROVIDER_PRESETS.deepseek.baseUrl, model: PROVIDER_PRESETS.deepseek.defaultModel },
+      zhipu: { apiKey: "", baseUrl: PROVIDER_PRESETS.zhipu.baseUrl, model: PROVIDER_PRESETS.zhipu.defaultModel },
+      mimo: { apiKey: "", baseUrl: PROVIDER_PRESETS.mimo.baseUrl, model: PROVIDER_PRESETS.mimo.defaultModel },
+      qwen: { apiKey: "", baseUrl: PROVIDER_PRESETS.qwen.baseUrl, model: PROVIDER_PRESETS.qwen.defaultModel },
+      custom: { apiKey: "", baseUrl: "", model: "" }
+    },
     providerApiKeys: {
       deepseek: "",
       zhipu: "",
@@ -280,6 +300,11 @@ export const DEFAULT_SETTINGS: LookupSettings = {
     playbackRate: 1,
     prompt: DEFAULT_SPEECH_EXPLANATION_PROMPT,
     ttsStyle: DEFAULT_SPEECH_TTS_STYLE
+  },
+  history: {
+    enabled: true,
+    retentionDays: 90,
+    maxEntries: 500
   },
   prompts: {
     items: DEFAULT_PROMPTS.map(item => ({ ...item })),
@@ -463,21 +488,49 @@ export function normalizeSettings(raw: unknown): LookupSettings {
   const rawSpeechExplanation = (value.speechExplanation && typeof value.speechExplanation === "object"
     ? value.speechExplanation
     : {}) as Partial<LookupSettings["speechExplanation"]>;
+  const rawHistory = (value.history && typeof value.history === "object"
+    ? value.history
+    : {}) as Partial<LookupSettings["history"]>;
 
   const provider = isProviderId(rawApi.provider) ? rawApi.provider : DEFAULT_SETTINGS.api.provider;
-  const preset = PROVIDER_PRESETS[provider];
   const rawProviderApiKeys = (rawApi.providerApiKeys && typeof rawApi.providerApiKeys === "object"
     ? rawApi.providerApiKeys
     : {}) as Partial<Record<ProviderId, unknown>>;
+  const rawProviderConfigs = (rawApi.providerConfigs && typeof rawApi.providerConfigs === "object"
+    ? rawApi.providerConfigs
+    : {}) as Partial<Record<ProviderId, unknown>>;
+  const legacyApiKey = typeof rawApi.apiKey === "string" ? rawApi.apiKey.trim() : "";
+  const providerConfigs: Partial<Record<ProviderId, ProviderConnectionSettings>> = {};
   const providerApiKeys: Partial<Record<ProviderId, string>> = {};
   for (const id of Object.keys(PROVIDER_PRESETS) as ProviderId[]) {
-    const key = rawProviderApiKeys[id];
-    if (typeof key === "string") providerApiKeys[id] = key.trim();
+    const preset = PROVIDER_PRESETS[id];
+    const rawConfig = (rawProviderConfigs[id] && typeof rawProviderConfigs[id] === "object"
+      ? rawProviderConfigs[id]
+      : {}) as Partial<ProviderConnectionSettings>;
+    const legacyProviderKey = typeof rawProviderApiKeys[id] === "string"
+      ? rawProviderApiKeys[id].trim()
+      : "";
+    const apiKey = typeof rawConfig.apiKey === "string"
+      ? rawConfig.apiKey.trim()
+      : legacyProviderKey || (id === provider ? legacyApiKey : "");
+    const legacyActiveBaseUrl = id === provider && typeof rawApi.baseUrl === "string"
+      ? rawApi.baseUrl.trim()
+      : "";
+    const legacyActiveModel = id === provider && typeof rawApi.model === "string"
+      ? rawApi.model.trim()
+      : "";
+    providerConfigs[id] = {
+      apiKey,
+      baseUrl: typeof rawConfig.baseUrl === "string"
+        ? rawConfig.baseUrl.trim()
+        : legacyActiveBaseUrl || preset.baseUrl,
+      model: typeof rawConfig.model === "string"
+        ? rawConfig.model.trim()
+        : legacyActiveModel || preset.defaultModel
+    };
+    providerApiKeys[id] = apiKey;
   }
-  const legacyApiKey = typeof rawApi.apiKey === "string" ? rawApi.apiKey.trim() : "";
-  if (legacyApiKey && !Object.prototype.hasOwnProperty.call(rawProviderApiKeys, provider)) {
-    providerApiKeys[provider] = legacyApiKey;
-  }
+  const activeProviderConfig = providerConfigs[provider]!;
   const timeoutMs = Number(rawApi.timeoutMs);
   const pronunciationProvider = isPronunciationProviderId(rawPronunciation.provider)
     ? rawPronunciation.provider
@@ -499,10 +552,11 @@ export function normalizeSettings(raw: unknown): LookupSettings {
     },
     api: {
       provider,
-      baseUrl: typeof rawApi.baseUrl === "string" ? rawApi.baseUrl.trim() : preset.baseUrl,
-      apiKey: providerApiKeys[provider] ?? legacyApiKey,
+      baseUrl: activeProviderConfig.baseUrl,
+      apiKey: activeProviderConfig.apiKey,
+      providerConfigs,
       providerApiKeys,
-      model: typeof rawApi.model === "string" ? rawApi.model.trim() : preset.defaultModel,
+      model: activeProviderConfig.model,
       timeoutMs: Number.isFinite(timeoutMs) && timeoutMs >= 5000 && timeoutMs <= 120000
         ? timeoutMs
         : DEFAULT_SETTINGS.api.timeoutMs
@@ -552,6 +606,21 @@ export function normalizeSettings(raw: unknown): LookupSettings {
         && rawSpeechExplanation.ttsStyle.trim() !== LEGACY_DEFAULT_SPEECH_TTS_STYLE
         ? rawSpeechExplanation.ttsStyle.trim()
         : DEFAULT_SETTINGS.speechExplanation.ttsStyle
+    },
+    history: {
+      enabled: typeof rawHistory.enabled === "boolean"
+        ? rawHistory.enabled
+        : DEFAULT_SETTINGS.history.enabled,
+      retentionDays: Number.isInteger(Number(rawHistory.retentionDays))
+        && Number(rawHistory.retentionDays) >= 0
+        && Number(rawHistory.retentionDays) <= 3650
+        ? Number(rawHistory.retentionDays)
+        : DEFAULT_SETTINGS.history.retentionDays,
+      maxEntries: Number.isInteger(Number(rawHistory.maxEntries))
+        && Number(rawHistory.maxEntries) >= 50
+        && Number(rawHistory.maxEntries) <= 5000
+        ? Number(rawHistory.maxEntries)
+        : DEFAULT_SETTINGS.history.maxEntries
     },
     prompts: migrateLegacyPrompts((value as unknown as { prompts?: unknown }).prompts)
   };

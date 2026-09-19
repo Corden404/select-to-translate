@@ -13,6 +13,11 @@ export interface LlmConnectionTestResult {
   preview: string;
 }
 
+const MAX_STREAM_BYTES = 8 * 1024 * 1024;
+const MAX_STREAM_BUFFER_CHARS = 1024 * 1024;
+const MAX_STREAM_OUTPUT_CHARS = 200_000;
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+
 export class LlmRequestError extends Error {
   constructor(
     message: string,
@@ -32,6 +37,42 @@ export class LlmRequestError extends Error {
   }
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost"
+    || normalized === "127.0.0.1"
+    || normalized === "::1"
+    || normalized === "[::1]";
+}
+
+async function readResponseTextLimited(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+  while (true) {
+    const result = await reader.read();
+    if (result.done) break;
+    const remaining = maxBytes - total;
+    if (remaining <= 0) {
+      await reader.cancel();
+      break;
+    }
+    const chunk = result.value.byteLength > remaining
+      ? result.value.subarray(0, remaining)
+      : result.value;
+    total += chunk.byteLength;
+    text += decoder.decode(chunk, { stream: true });
+    if (chunk.byteLength < result.value.byteLength) {
+      await reader.cancel();
+      break;
+    }
+  }
+  text += decoder.decode();
+  return text;
+}
+
 export function buildChatCompletionsUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
   if (!trimmed) throw new LlmRequestError("请先配置 API Base URL。", "config");
@@ -45,6 +86,12 @@ export function buildChatCompletionsUrl(baseUrl: string): string {
 
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw new LlmRequestError("API Base URL 只支持 http 或 https。", "config");
+  }
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+    throw new LlmRequestError(
+      "公网 API 必须使用 HTTPS；仅 localhost、127.0.0.1 或 [::1] 允许使用 HTTP。",
+      "config"
+    );
   }
 
   if (/\/chat\/completions$/i.test(url.pathname)) {
@@ -179,7 +226,7 @@ export async function streamOpenAiCompatible(
     }
 
     if (!response.ok) {
-      throw mapHttpError(response.status, await response.text());
+      throw mapHttpError(response.status, await readResponseTextLimited(response, MAX_ERROR_BODY_BYTES));
     }
     if (!response.body) {
       throw new LlmRequestError("API 没有返回可读取的流。", "protocol");
@@ -189,6 +236,8 @@ export async function streamOpenAiCompatible(
     const decoder = new TextDecoder();
     let buffer = "";
     let sawData = false;
+    let responseBytes = 0;
+    let outputChars = 0;
 
     const consumeLine = (line: string): boolean => {
       const trimmed = line.trim();
@@ -209,6 +258,10 @@ export async function streamOpenAiCompatible(
       if (streamError) throw streamError;
       const text = extractContent(parsed);
       if (text) {
+        outputChars += text.length;
+        if (outputChars > MAX_STREAM_OUTPUT_CHARS) {
+          throw new LlmRequestError("模型返回内容过大，已为保护浏览器内存中止请求。", "protocol");
+        }
         sawData = true;
         onChunk(text);
       }
@@ -229,7 +282,14 @@ export async function streamOpenAiCompatible(
       }
       if (result.done) break;
 
+      responseBytes += result.value.byteLength;
+      if (responseBytes > MAX_STREAM_BYTES) {
+        throw new LlmRequestError("模型流响应过大，已为保护浏览器内存中止请求。", "protocol");
+      }
       buffer += decoder.decode(result.value, { stream: true });
+      if (buffer.length > MAX_STREAM_BUFFER_CHARS) {
+        throw new LlmRequestError("模型流包含异常大的单条数据，已中止请求。", "protocol");
+      }
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
       for (const line of lines) {

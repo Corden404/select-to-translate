@@ -15,6 +15,15 @@ describe("OpenAI-compatible provider config", () => {
       .toBe("https://api.xiaomimimo.com/v1/chat/completions");
   });
 
+  it("requires HTTPS except for loopback development endpoints", () => {
+    expect(buildChatCompletionsUrl("http://127.0.0.1:8080/v1"))
+      .toBe("http://127.0.0.1:8080/v1/chat/completions");
+    expect(buildChatCompletionsUrl("http://localhost:8080"))
+      .toBe("http://localhost:8080/chat/completions");
+    expect(() => buildChatCompletionsUrl("http://api.example.com/v1"))
+      .toThrow("必须使用 HTTPS");
+  });
+
   it("parses OpenAI-compatible SSE chunks", async () => {
     const originalFetch = globalThis.fetch;
     const encoder = new TextEncoder();
@@ -124,6 +133,31 @@ describe("OpenAI-compatible provider config", () => {
         model: "test-model",
         timeoutMs: 5000
       })).rejects.toMatchObject({ code: "auth" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("aborts oversized streaming responses", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(8 * 1024 * 1024 + 1));
+        controller.close();
+      }
+    }), { status: 200 });
+
+    try {
+      await expect(streamOpenAiCompatible(
+        {
+          baseUrl: "https://example.com/v1",
+          apiKey: "test-key",
+          model: "test-model",
+          messages: [{ role: "user", content: "hello" }]
+        },
+        new AbortController().signal,
+        () => undefined
+      )).rejects.toMatchObject({ code: "protocol" });
     } finally {
       globalThis.fetch = originalFetch;
     }

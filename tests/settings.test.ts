@@ -131,6 +131,7 @@ Requirements:
 
     expect(settings.api.apiKey).toBe("legacy-mimo-key");
     expect(settings.api.providerApiKeys?.mimo).toBe("legacy-mimo-key");
+    expect(settings.api.providerConfigs?.mimo?.apiKey).toBe("legacy-mimo-key");
   });
 
   it("keeps API keys isolated by model provider", () => {
@@ -150,6 +151,46 @@ Requirements:
     expect(settings.api.providerApiKeys?.deepseek).toBe("deepseek-key");
     expect(settings.api.providerApiKeys?.mimo).toBe("mimo-key");
     expect(settings.api.providerApiKeys?.qwen).toBe("qwen-key");
+  });
+
+  it("keeps key, Base URL, and model isolated by provider", () => {
+    const settings = normalizeSettings({
+      api: {
+        provider: "qwen",
+        providerConfigs: {
+          qwen: {
+            apiKey: "qwen-key",
+            baseUrl: "https://workspace.example/compatible-mode/v1",
+            model: "qwen-custom"
+          },
+          mimo: {
+            apiKey: "mimo-key",
+            baseUrl: "https://api.xiaomimimo.com/v1",
+            model: "mimo-v2.5-pro"
+          }
+        }
+      }
+    });
+
+    expect(settings.api.apiKey).toBe("qwen-key");
+    expect(settings.api.baseUrl).toBe("https://workspace.example/compatible-mode/v1");
+    expect(settings.api.model).toBe("qwen-custom");
+    expect(settings.api.providerConfigs?.mimo).toEqual({
+      apiKey: "mimo-key",
+      baseUrl: "https://api.xiaomimimo.com/v1",
+      model: "mimo-v2.5-pro"
+    });
+  });
+
+  it("normalizes local history retention settings", () => {
+    const defaults = normalizeSettings({});
+    expect(defaults.history).toEqual({ enabled: true, retentionDays: 90, maxEntries: 500 });
+
+    const custom = normalizeSettings({ history: { enabled: false, retentionDays: 365, maxEntries: 1000 } });
+    expect(custom.history).toEqual({ enabled: false, retentionDays: 365, maxEntries: 1000 });
+
+    const invalid = normalizeSettings({ history: { enabled: true, retentionDays: -1, maxEntries: 10 } });
+    expect(invalid.history).toEqual(defaults.history);
   });
 
   it("routes explicit prompts and keeps defaults", () => {
@@ -197,6 +238,13 @@ Requirements:
           deepseek: "deepseek-secret",
           mimo: "mimo-provider-secret"
         },
+        providerConfigs: {
+          mimo: {
+            apiKey: "mimo-config-secret",
+            baseUrl: "https://private-provider.example/v1",
+            model: "private-provider-model"
+          }
+        },
         baseUrl: "https://private.example/v1",
         model: "private-model"
       },
@@ -222,6 +270,9 @@ Requirements:
     expect(serialized).not.toContain("llm-secret");
     expect(serialized).not.toContain("deepseek-secret");
     expect(serialized).not.toContain("mimo-provider-secret");
+    expect(serialized).not.toContain("mimo-config-secret");
+    expect(serialized).not.toContain("private-provider.example");
+    expect(serialized).not.toContain("private-provider-model");
     expect(serialized).not.toContain("tts-secret");
     expect(serialized).not.toContain("youdao-key");
     expect(serialized).not.toContain("youdao-secret");

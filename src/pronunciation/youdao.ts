@@ -14,28 +14,17 @@ async function sha256Hex(value: string): Promise<string> {
     .join("");
 }
 
-function toDataUrl(bytes: ArrayBuffer, contentType: string): string {
-  const data = new Uint8Array(bytes);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < data.length; offset += chunkSize) {
-    binary += String.fromCharCode(...data.subarray(offset, offset + chunkSize));
-  }
-  return `data:${contentType || "audio/mpeg"};base64,${btoa(binary)}`;
-}
-
-function findBasic(root: unknown): { ukPhonetic?: string; ukSpeech?: string } | null {
+function findBasic(root: unknown): { ukPhonetic?: string } | null {
   if (!root || typeof root !== "object") return null;
   const value = root as {
-    basic?: { ukPhonetic?: unknown; ukSpeech?: unknown };
-    result?: Array<{ basic?: { ukPhonetic?: unknown; ukSpeech?: unknown } }>;
+    basic?: { ukPhonetic?: unknown };
+    result?: Array<{ basic?: { ukPhonetic?: unknown } }>;
   };
 
   const basic = value.basic ?? value.result?.find(item => item?.basic)?.basic;
   if (!basic) return null;
   return {
-    ukPhonetic: typeof basic.ukPhonetic === "string" ? basic.ukPhonetic : undefined,
-    ukSpeech: typeof basic.ukSpeech === "string" ? basic.ukSpeech : undefined
+    ukPhonetic: typeof basic.ukPhonetic === "string" ? basic.ukPhonetic : undefined
   };
 }
 
@@ -89,21 +78,9 @@ export async function getYoudaoPronunciation(
   const basic = findBasic(json);
   if (!basic) throw new Error("有道词典没有返回英式发音信息。");
 
-  let audioDataUrl: string | undefined;
-  if (basic.ukSpeech) {
-    const audioResponse = await fetch(basic.ukSpeech, { signal });
-    if (audioResponse.ok) {
-      audioDataUrl = toDataUrl(
-        await audioResponse.arrayBuffer(),
-        audioResponse.headers.get("content-type") ?? "audio/mpeg"
-      );
-    }
-  }
-
   return {
     phonetic: basic.ukPhonetic,
-    audioDataUrl,
-    label: "有道词典 · 英音"
+    label: "有道词典 · 英式音标"
   };
 }
 

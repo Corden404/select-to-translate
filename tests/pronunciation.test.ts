@@ -37,7 +37,8 @@ describe("Youdao pronunciation provider", () => {
       });
 
       expect(result.phonetic).toBe("dɪˈtekt");
-      expect(result.audioDataUrl).toMatch(/^data:audio\/mpeg;base64,/);
+      expect(result.audioDataUrl).toBeUndefined();
+      expect(result.label).toContain("英式音标");
       expect(requests[0].url).toBe("https://openapi.youdao.com/v2/dict");
 
       const form = new URLSearchParams(requests[0].body);
@@ -45,7 +46,7 @@ describe("Youdao pronunciation provider", () => {
       expect(form.get("appKey")).toBe("app-key");
       expect(form.get("signType")).toBe("v3");
       expect(form.get("sign")).toMatch(/^[a-f0-9]{64}$/);
-      expect(requests[1].url).toBe("https://audio.example/detect.mp3");
+      expect(requests).toHaveLength(1);
     } finally {
       globalThis.fetch = originalFetch;
     }

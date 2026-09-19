@@ -15,6 +15,14 @@ describe("content-script secret boundary", () => {
     expect(source).toContain('setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })');
   });
 
+  it("rejects synthetic page triggers and hides card internals from page scripts", () => {
+    const contentSource = readFileSync(new URL("../src/content/main.ts", import.meta.url), "utf8");
+    const cardSource = readFileSync(new URL("../src/content/floating-card.ts", import.meta.url), "utf8");
+    expect(contentSource).toContain("!event.isTrusted");
+    expect(cardSource).toContain('attachShadow({ mode: "closed" })');
+    expect(cardSource).toContain("!event.isTrusted");
+  });
+
   it("public settings structurally omit privileged configuration", () => {
     const publicSettings = toPublicLookupSettings({
       ...DEFAULT_SETTINGS,

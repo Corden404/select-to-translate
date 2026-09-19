@@ -27,6 +27,73 @@ export interface MiMoStreamingSpeechDiagnostics {
   chunkCount: number;
 }
 
+const MAX_TTS_JSON_RESPONSE_BYTES = 20 * 1024 * 1024;
+const MAX_TTS_AUDIO_BYTES = 12 * 1024 * 1024;
+const MAX_TTS_STREAM_RESPONSE_BYTES = 24 * 1024 * 1024;
+const MAX_TTS_STREAM_AUDIO_BYTES = 16 * 1024 * 1024;
+const MAX_TTS_STREAM_BUFFER_CHARS = 4 * 1024 * 1024;
+const MAX_TTS_STREAM_CHUNKS = 2048;
+const MAX_TTS_ERROR_BODY_BYTES = 64 * 1024;
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost"
+    || normalized === "127.0.0.1"
+    || normalized === "::1"
+    || normalized === "[::1]";
+}
+
+async function readResponseTextLimited(response: Response, maxBytes: number): Promise<{
+  text: string;
+  bytes: number;
+}> {
+  if (!response.body) return { text: "", bytes: 0 };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  while (true) {
+    const result = await reader.read();
+    if (result.done) break;
+    bytes += result.value.byteLength;
+    if (bytes > maxBytes) {
+      await reader.cancel();
+      throw new Error("MiMo TTS 响应过大，已为保护浏览器内存中止请求。");
+    }
+    text += decoder.decode(result.value, { stream: true });
+  }
+  text += decoder.decode();
+  return { text, bytes };
+}
+
+async function readErrorDetails(response: Response): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  while (true) {
+    const result = await reader.read();
+    if (result.done) break;
+    const remaining = MAX_TTS_ERROR_BODY_BYTES - bytes;
+    if (remaining <= 0) {
+      await reader.cancel();
+      break;
+    }
+    const chunk = result.value.byteLength > remaining
+      ? result.value.subarray(0, remaining)
+      : result.value;
+    bytes += chunk.byteLength;
+    text += decoder.decode(chunk, { stream: true });
+    if (chunk.byteLength < result.value.byteLength) {
+      await reader.cancel();
+      break;
+    }
+  }
+  text += decoder.decode();
+  return text.slice(0, 500);
+}
+
 function buildChatCompletionsUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
   if (!trimmed) throw new Error("请先配置 MiMo TTS Base URL。");
@@ -40,6 +107,9 @@ function buildChatCompletionsUrl(baseUrl: string): string {
 
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw new Error("MiMo TTS Base URL 只支持 http 或 https。");
+  }
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+    throw new Error("MiMo TTS 公网 Base URL 必须使用 HTTPS；仅本机回环地址允许 HTTP。");
   }
 
   return /\/chat\/completions$/i.test(url.pathname)
@@ -165,7 +235,7 @@ async function synthesizeMiMoSpeech(
     const headersReceivedAt = performance.now();
 
     if (!response.ok) {
-      const details = (await response.text()).slice(0, 500);
+      const details = await readErrorDetails(response);
       if (response.status === 401 || response.status === 403) {
         throw new Error("MiMo TTS API Key 无效或没有模型访问权限。");
       }
@@ -178,8 +248,11 @@ async function synthesizeMiMoSpeech(
     }
 
     let responseText: string;
+    let responseBytes: number;
     try {
-      responseText = await response.text();
+      const bounded = await readResponseTextLimited(response, MAX_TTS_JSON_RESPONSE_BYTES);
+      responseText = bounded.text;
+      responseBytes = bounded.bytes;
     } catch (error) {
       if (timeout.timedOut()) throw new Error("MiMo TTS 请求超时。");
       if (signal?.aborted) throw error;
@@ -198,6 +271,10 @@ async function synthesizeMiMoSpeech(
     if (!audioBase64) {
       throw new Error("MiMo TTS 没有返回音频数据。");
     }
+    const audioBytes = estimateBase64Bytes(audioBase64);
+    if (audioBytes > MAX_TTS_AUDIO_BYTES) {
+      throw new Error("MiMo TTS 音频过大，已为保护浏览器内存中止请求。");
+    }
     const parseCompletedAt = performance.now();
 
     return {
@@ -209,8 +286,8 @@ async function synthesizeMiMoSpeech(
         parseMs: Math.max(0, parseCompletedAt - parseStartedAt),
         totalMs: Math.max(0, parseCompletedAt - requestStartedAt),
         inputChars: input.length,
-        responseBytes: new TextEncoder().encode(responseText).byteLength,
-        audioBytes: estimateBase64Bytes(audioBase64)
+        responseBytes,
+        audioBytes
       }
     };
   } finally {
@@ -297,7 +374,7 @@ export async function streamMiMoExplanationSpeech(
 
     const headersReceivedAt = performance.now();
     if (!response.ok) {
-      const details = (await response.text()).slice(0, 500);
+      const details = await readErrorDetails(response);
       if (response.status === 401 || response.status === 403) {
         throw new Error("MiMo TTS API Key 无效或没有模型访问权限。");
       }
@@ -337,9 +414,13 @@ export async function streamMiMoExplanationSpeech(
       parseMs += performance.now() - parseStartedAt;
       if (!audioBase64) return false;
 
+      const chunkBytes = estimateBase64Bytes(audioBase64);
+      if (chunkCount >= MAX_TTS_STREAM_CHUNKS || audioBytes + chunkBytes > MAX_TTS_STREAM_AUDIO_BYTES) {
+        throw new Error("MiMo TTS 音频流过大，已为保护浏览器内存中止请求。");
+      }
       if (firstAudioAt === null) firstAudioAt = performance.now();
       chunkCount += 1;
-      audioBytes += estimateBase64Bytes(audioBase64);
+      audioBytes += chunkBytes;
       onAudioChunk(audioBase64);
       return false;
     };
@@ -355,7 +436,13 @@ export async function streamMiMoExplanationSpeech(
       }
       if (result.done) break;
       responseBytes += result.value.byteLength;
+      if (responseBytes > MAX_TTS_STREAM_RESPONSE_BYTES) {
+        throw new Error("MiMo TTS 流式响应过大，已为保护浏览器内存中止请求。");
+      }
       buffer += decoder.decode(result.value, { stream: true });
+      if (buffer.length > MAX_TTS_STREAM_BUFFER_CHARS) {
+        throw new Error("MiMo TTS 流包含异常大的单条数据，已中止请求。");
+      }
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
       for (const line of lines) {

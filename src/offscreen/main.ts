@@ -10,10 +10,12 @@ interface AudioActionResponse {
   ok: boolean;
   message?: string;
   started?: boolean;
+  replayable?: boolean;
 }
 
 const PCM_SAMPLE_RATE = 24000;
 const START_BUFFER_SECONDS = 0.03;
+const MAX_REPLAY_AUDIO_BYTES = 8 * 1024 * 1024;
 
 let audioContext: AudioContext | null = null;
 let currentRequestId = "";
@@ -24,6 +26,8 @@ let streamComplete = false;
 let replayRequestId = "";
 let replayPlaybackRate = 1;
 let replayChunks: string[] = [];
+let replayBytes = 0;
+let replayCacheOverflow = false;
 const activeSources = new Set<AudioBufferSourceNode>();
 
 function normalizedRate(value: number | undefined): number {
@@ -53,7 +57,14 @@ function clearReplayCache(requestId?: string): void {
   replayRequestId = "";
   replayPlaybackRate = 1;
   replayChunks = [];
+  replayBytes = 0;
+  replayCacheOverflow = false;
   streamComplete = false;
+}
+
+function estimateBase64Bytes(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor(value.length * 3 / 4) - padding);
 }
 
 function decodePcm16(audioBase64: string): Float32Array {
@@ -98,7 +109,17 @@ async function queuePcmChunk(
   source.start(startAt);
   nextStartTime = startAt + buffer.duration / playbackRate;
 
-  if (cacheForReplay) replayChunks.push(audioBase64);
+  if (cacheForReplay && !replayCacheOverflow) {
+    const chunkBytes = estimateBase64Bytes(audioBase64);
+    if (replayBytes + chunkBytes <= MAX_REPLAY_AUDIO_BYTES) {
+      replayChunks.push(audioBase64);
+      replayBytes += chunkBytes;
+    } else {
+      replayChunks = [];
+      replayBytes = 0;
+      replayCacheOverflow = true;
+    }
+  }
   if (firstChunkScheduled) return false;
 
   firstChunkScheduled = true;
@@ -144,6 +165,8 @@ chrome.runtime.onMessage.addListener((
     currentPlaybackRate = normalizedRate(message.playbackRate);
     replayRequestId = message.requestId;
     replayPlaybackRate = currentPlaybackRate;
+    replayBytes = 0;
+    replayCacheOverflow = false;
     streamComplete = false;
     void ensureAudioContext()
       .then(() => sendResponse({ ok: true }))
@@ -167,8 +190,10 @@ chrome.runtime.onMessage.addListener((
   }
 
   if (message.type === "STREAM_END" && typeof message.requestId === "string") {
-    if (message.requestId === replayRequestId) streamComplete = true;
-    sendResponse({ ok: true });
+    if (message.requestId === replayRequestId) {
+      streamComplete = !replayCacheOverflow && replayChunks.length > 0;
+    }
+    sendResponse({ ok: true, replayable: streamComplete });
     return false;
   }
 

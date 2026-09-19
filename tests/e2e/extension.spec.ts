@@ -34,7 +34,7 @@ function createPdf(text: string): Buffer {
   return Buffer.from(body, "ascii");
 }
 
-test("extension lookup, streaming chat, history, settings, and PDF work end to end", async () => {
+test("extension security, lookup, history, settings, and PDF work end to end", async () => {
   const textPdf = createPdf("A PDF reader can detect words in context.");
   const blankPdf = createPdf("");
   let initialLookupRequests = 0;
@@ -112,7 +112,7 @@ test("extension lookup, streaming chat, history, settings, and PDF work end to e
     }
 
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end("<!doctype html><html><body><p id='p'>A reliable lookup tool can detect the meaning of a word in context.</p></body></html>");
+    res.end("<!doctype html><html><body><p id='p'>A reliable lookup tool can <span id='word'>detect</span> the meaning of a word in context.</p><button id='other'>Elsewhere</button></body></html>");
   });
 
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -148,6 +148,13 @@ test("extension lookup, streaming chat, history, settings, and PDF work end to e
     await popup.locator("#apiKey").fill("test-key");
     await popup.locator("#baseUrl").fill(origin);
     await popup.locator("#model").fill("mock-model");
+    await popup.locator("#provider").selectOption("deepseek");
+    await popup.locator("#provider").selectOption("custom");
+    await expect(popup.locator("#apiKey")).toHaveValue("test-key");
+    await expect(popup.locator("#baseUrl")).toHaveValue(origin);
+    await expect(popup.locator("#model")).toHaveValue("mock-model");
+    await expect(popup.locator("#historyEnabled")).toBeChecked();
+    await expect(popup.locator("#historyRetentionDays")).toHaveValue("90");
     await popup.locator("#testApi").click();
     await expect(popup.locator("#apiTestStatus")).toContainText("连接成功");
     await expect(popup.locator("#apiTestStatus")).toContainText("OK");
@@ -192,79 +199,54 @@ test("extension lookup, streaming chat, history, settings, and PDF work end to e
     await page.goto(origin + "/", { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => Boolean(document.getElementById("__selection_lookup_root__")));
 
-    const displayLatencyMs = await page.evaluate(async () => {
-      const paragraph = document.getElementById("p")!;
-      const node = paragraph.firstChild!;
-      const text = node.textContent!;
-      const start = text.indexOf("detect");
-      const range = document.createRange();
-      range.setStart(node, start);
-      range.setEnd(node, start + "detect".length);
-      const selection = getSelection()!;
-      selection.removeAllRanges();
-      selection.addRange(range);
-
-      const host = document.getElementById("__selection_lookup_root__")!;
-      const startedAt = performance.now();
-      const visible = new Promise<number>(resolve => {
-        const observer = new MutationObserver(() => {
-          if (host.style.display === "block") {
-            observer.disconnect();
-            resolve(performance.now() - startedAt);
-          }
-        });
-        observer.observe(host, { attributes: true, attributeFilter: ["style"] });
-      });
-
-      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
-      return visible;
-    });
-
-    expect(displayLatencyMs).toBeLessThan(250);
-    await expect(page.locator("#__selection_lookup_root__ .body")).toHaveText("初始解释");
-    expect(initialLookupRequests).toBe(1);
-
-    await page.locator("#__selection_lookup_root__ .close").click();
-    await page.waitForTimeout(220);
     await page.evaluate(() => {
-      const paragraph = document.getElementById("p")!;
-      const node = paragraph.firstChild!;
-      const text = node.textContent!;
-      const start = text.indexOf("detect");
+      const word = document.getElementById("word")!;
+      const node = word.firstChild!;
       const range = document.createRange();
-      range.setStart(node, start);
-      range.setEnd(node, start + "detect".length);
+      range.selectNodeContents(node);
       const selection = getSelection()!;
       selection.removeAllRanges();
       selection.addRange(range);
       document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
     });
-    await expect(page.locator("#__selection_lookup_root__ .body")).toHaveText("初始解释");
-    await expect.poll(() => initialLookupRequests).toBe(2);
+    await page.waitForTimeout(180);
+    expect(initialLookupRequests).toBe(0);
+    expect(await page.evaluate(() => document.getElementById("__selection_lookup_root__")!.style.display)).toBe("none");
+    expect(await page.evaluate(() => document.getElementById("__selection_lookup_root__")!.shadowRoot)).toBeNull();
 
-    await page.locator("#__selection_lookup_root__ .kind").selectOption("sentence");
-    await expect(page.locator("#__selection_lookup_root__ .kind")).toHaveValue("sentence");
-    await expect(page.locator("#__selection_lookup_root__ .body")).toHaveText("初始解释");
-    await expect.poll(() => initialLookupRequests).toBe(3);
-
-    await page.locator("#__selection_lookup_root__ .follow-up").click();
-    await page.locator("#__selection_lookup_root__ .chat-input").fill("为什么？");
     await page.evaluate(() => {
-      const host = document.getElementById("__selection_lookup_root__")!;
-      const shadow = host.shadowRoot!;
-      const send = shadow.querySelector<HTMLButtonElement>(".send")!;
-      send.click();
-      send.click();
+      const other = document.getElementById("other")!;
+      other.addEventListener("pointerdown", event => {
+        event.preventDefault();
+        const word = document.getElementById("word")!;
+        const range = document.createRange();
+        range.selectNodeContents(word);
+        const selection = getSelection()!;
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }, { once: true });
     });
-    await expect(page.locator("#__selection_lookup_root__ .bubble.assistant").last()).toHaveText("追问回答");
-    await expect.poll(() => followUpRequests).toBe(1);
+    await page.locator("#other").click();
+    await page.waitForTimeout(180);
+    expect(initialLookupRequests).toBe(0);
+
+    const displayStartedAt = Date.now();
+    await page.locator("#word").dblclick();
+    await expect.poll(() => page.evaluate(() => getSelection()?.toString().trim())).toBe("detect");
+    await page.waitForFunction(
+      () => document.getElementById("__selection_lookup_root__")?.style.display === "block",
+      undefined,
+      { timeout: 3000 }
+    );
+    expect(Date.now() - displayStartedAt).toBeLessThan(500);
+    await expect.poll(() => initialLookupRequests).toBe(1);
+    expect(await page.evaluate(() => document.getElementById("__selection_lookup_root__")!.shadowRoot)).toBeNull();
 
     const history = await context.newPage();
     await history.goto("chrome-extension://" + extensionId + "/history.html");
     await expect(history.getByText("detect", { exact: true }).first()).toBeVisible();
     await history.getByText("detect", { exact: true }).first().click();
     await expect(history.getByText("初始解释", { exact: true }).first()).toBeVisible();
-    await expect(history.getByText("追问回答", { exact: true })).toBeVisible();
 
     const pdf = await context.newPage();
     await pdf.goto(
@@ -273,23 +255,25 @@ test("extension lookup, streaming chat, history, settings, and PDF work end to e
     await expect(pdf.getByText(/已加载 1 页/)).toBeVisible();
     await pdf.waitForSelector(".pdf-text-layer span");
 
-    await pdf.evaluate(() => {
-      const span = [...document.querySelectorAll<HTMLElement>(".pdf-text-layer span")]
-        .find(item => item.textContent?.includes("detect"));
-      if (!span || !span.firstChild) throw new Error("PDF text layer did not contain detect");
-      const node = span.firstChild;
-      const text = node.textContent ?? "";
-      const start = text.indexOf("detect");
-      const range = document.createRange();
-      range.setStart(node, start);
-      range.setEnd(node, start + "detect".length);
-      const selection = getSelection()!;
-      selection.removeAllRanges();
-      selection.addRange(range);
-      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
-    });
-
-    await expect(pdf.locator("#__selection_lookup_root__ .body")).toHaveText("初始解释");
+    const pdfText = pdf.locator(".pdf-text-layer span").filter({ hasText: "detect" }).first();
+    const pdfTextBox = await pdfText.boundingBox();
+    const pdfTextValue = await pdfText.textContent();
+    if (!pdfTextBox || !pdfTextValue) throw new Error("PDF text layer did not contain a selectable span");
+    const detectIndex = pdfTextValue.indexOf("detect");
+    if (detectIndex < 0) throw new Error("PDF text layer did not contain detect");
+    const detectCenter = (detectIndex + "detect".length / 2) / pdfTextValue.length;
+    await pdf.mouse.dblclick(
+      pdfTextBox.x + Math.max(1, Math.min(pdfTextBox.width - 1, pdfTextBox.width * detectCenter)),
+      pdfTextBox.y + pdfTextBox.height / 2
+    );
+    await expect.poll(() => pdf.evaluate(() => getSelection()?.toString().trim())).toBe("detect");
+    await pdf.waitForFunction(
+      () => document.getElementById("__selection_lookup_root__")?.style.display === "block",
+      undefined,
+      { timeout: 3000 }
+    );
+    await expect.poll(() => initialLookupRequests).toBe(2);
+    expect(await pdf.evaluate(() => document.getElementById("__selection_lookup_root__")!.shadowRoot)).toBeNull();
 
     await pdf.goto(
       "chrome-extension://" + extensionId + "/pdf.html?src=" + encodeURIComponent(origin + "/blank.pdf")

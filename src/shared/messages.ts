@@ -166,6 +166,7 @@ export type OneShotMessage =
 export interface SpeechActionResponse {
   ok: boolean;
   message?: string;
+  replayable?: boolean;
 }
 
 export interface PronunciationResponse {

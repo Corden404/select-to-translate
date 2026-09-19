@@ -1,4 +1,4 @@
-import { putHistoryRecord } from "../history/db";
+import { pruneHistory, putHistoryRecord } from "../history/db";
 import type { LookupHistoryRecord } from "../history/types";
 import { streamOpenAiCompatible, testOpenAiCompatibleConnection } from "../llm/openai-compatible";
 import { getMiMoPronunciation, streamMiMoExplanationSpeech } from "../pronunciation/mimo";
@@ -47,6 +47,20 @@ let offscreenCreation: Promise<void> | null = null;
 let latestSpeechLookupRequestId = "";
 let replayableSpeech: ReplayableSpeech | null = null;
 const cancelledSpeechRequestIds = new Set<string>();
+const lookupStartsBySource = new Map<string, number[]>();
+
+function allowLookupBurst(sourceKey: string): boolean {
+  const now = Date.now();
+  const recent = (lookupStartsBySource.get(sourceKey) ?? [])
+    .filter(timestamp => now - timestamp < 10000);
+  if (recent.length >= 20) {
+    lookupStartsBySource.set(sourceKey, recent);
+    return false;
+  }
+  recent.push(now);
+  lookupStartsBySource.set(sourceKey, recent);
+  return true;
+}
 
 async function ensureOffscreenDocument(): Promise<void> {
   if (offscreenCreation) {
@@ -220,11 +234,15 @@ async function startSpeechExplanation(
     }) as SpeechActionResponse | undefined;
     if (!endResponse?.ok) throw new Error(endResponse?.message ?? "流式音频结束失败。");
 
-    replayableSpeech = {
-      requestId,
-      playbackRate: settings.speechExplanation.playbackRate
-    };
-    onReady?.();
+    if (endResponse.replayable) {
+      replayableSpeech = {
+        requestId,
+        playbackRate: settings.speechExplanation.playbackRate
+      };
+      onReady?.();
+    } else if (replayableSpeech?.requestId === requestId) {
+      replayableSpeech = null;
+    }
 
     const firstTokenAt = llmFirstTokenAt ?? llmCompletedAt;
     const firstChunkAt = firstChunkReceivedAt ?? performance.now();
@@ -362,8 +380,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (changes[AUTO_LOOKUP_STORAGE_KEY]?.newValue === false) {
     void cancelSpeechSession();
   } else if (changes[SETTINGS_STORAGE_KEY]) {
-    void loadLookupSettings().then(settings => {
-      if (!settings.speechExplanation.enabled) return cancelSpeechSession();
+    void loadLookupSettings().then(async settings => {
+      if (settings.history.enabled) await pruneHistory(settings.history);
+      if (!settings.speechExplanation.enabled) await cancelSpeechSession();
     }).catch(() => undefined);
   }
 });
@@ -380,6 +399,8 @@ chrome.runtime.onConnect.addListener(port => {
   let chatDispatchInProgress = false;
   let pendingAssistant = "";
   let streamMode: "lookup" | "chat" | null = null;
+  let historySettings = { ...DEFAULT_SETTINGS.history };
+  const lookupSourceKey = `${port.sender?.tab?.id ?? "extension"}:${port.sender?.frameId ?? 0}`;
 
   const safePost = (message: LookupPortResponse) => {
     if (disconnected) return;
@@ -391,9 +412,9 @@ chrome.runtime.onConnect.addListener(port => {
   };
 
   const saveRecord = async (record: LookupHistoryRecord | null = activeRecord) => {
-    if (!record) return;
+    if (!record || !historySettings.enabled) return;
     record.updatedAt = Date.now();
-    await putHistoryRecord(record);
+    await putHistoryRecord(record, historySettings);
   };
 
   const abortStreaming = () => {
@@ -526,6 +547,15 @@ chrome.runtime.onConnect.addListener(port => {
       return;
     }
 
+    if (message.type === "LOOKUP_START" && !allowLookupBurst(lookupSourceKey)) {
+      safePost({
+        type: "LOOKUP_ERROR",
+        requestId: message.requestId,
+        message: "查词请求过于频繁，请稍后再试。"
+      });
+      return;
+    }
+
     const speechStop = message.type === "LOOKUP_START"
       ? (() => {
           latestSpeechLookupRequestId = message.requestId;
@@ -552,6 +582,7 @@ chrome.runtime.onConnect.addListener(port => {
           loadLookupSettings(),
           speechStop
         ]);
+        historySettings = { ...settings.history };
         if (message.requestId === latestSpeechLookupRequestId
           && !cancelledSpeechRequestIds.has(message.requestId)
           && settings.speechExplanation.enabled
@@ -607,13 +638,14 @@ chrome.runtime.onConnect.addListener(port => {
         return;
       }
 
+      const settings = await loadLookupSettings();
+      historySettings = { ...settings.history };
       const userMessage = message.message.trim();
       conversation.push({ role: "user", content: userMessage });
       activeRecord.messages = [...conversation];
       activeRecord.status = "streaming";
       await saveRecord();
 
-      const settings = await loadLookupSettings();
       await streamAssistant(message.requestId, "chat", settings);
     })().catch(error => {
       safePost({
@@ -778,7 +810,7 @@ chrome.runtime.onMessage.addListener((
             provider: "youdao",
             latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
             preview: result.phonetic ? "UK /" + result.phonetic + "/" : result.label,
-            message: "有道词典连接成功。"
+            message: "有道词典英式音标查询成功。"
           });
           return;
         }

@@ -38,9 +38,9 @@ MiMo 官方文档提供 OpenAI-compatible Chat Completions。查词场景默认�
 - 流式：基础 `mimo-v2.5-tts` 已支持低延迟实时流式；格式需使用 `pcm16`，返回 24kHz PCM16LE mono 音频块。
 - 调用规则：真正要朗读的文本必须放在 `assistant` role；`user` role 可选，用于自然语言控制语速、情绪、口音和表达风格。
 
-本项目查词场景默认使用非流式 WAV，因为单词/短词组很短，能直接交给浏览器 `Audio` 播放，代码复杂度更低。默认 `Mia`，并用 `user` 风格指令要求清晰自然的 British English dictionary-style pronunciation。官方没有声明这四个英文 voice ID 各自是英音还是美音，因此不把 `Mia` 描述成“官方英音音色”。
+本项目的手动单词发音使用非流式 WAV，因为单词/短词组很短，可以直接交给浏览器 `Audio` 播放。默认 `Mia`，并用 `user` 风格指令要求清晰自然的 British English dictionary-style pronunciation。官方没有声明这四个英文 voice ID 各自是英音还是美音，因此不把 `Mia` 描述成“官方英音音色”。
 
-TTS 只在用户点击发音按钮时调用，不会随每次选词自动请求。若主模型平台为 MiMo，TTS Key 留空可复用主 API Key；否则可单独配置 MiMo TTS Key。
+手动单词发音只在用户点击发音按钮时调用 TTS。若用户开启“自动语音解释”，每次符合条件的单词/短词组查词会额外生成一段英文语音稿，并以 `pcm16` / 24kHz 流式调用 MiMo TTS，以降低首音延迟。若主模型平台为 MiMo，TTS Key 留空可复用主 API Key；否则可单独配置 MiMo TTS Key。公网 MiMo Base URL 必须使用 HTTPS，本机回环地址可使用 HTTP 便于开发。
 
 ## 阿里云千问
 
@@ -56,9 +56,8 @@ TTS 只在用户点击发音按钮时调用，不会随每次选词自动请求�
 - 官方文档：https://ai.youdao.com/DOCSIRMA/html/dictionary/api/ydcd/index.html
 - 鉴权：`signType=v3`，`sign=sha256(appKey + input + salt + curtime + appSecret)`
 - 英式音标字段：`ukPhonetic`
-- 英式音频字段：`ukSpeech`
 
-有道现在作为备用 Provider。用户在发音设置中主动切换到有道并填写 AppKey / 应用密钥后才会调用该接口。服务权限、计费和数据使用规则以用户自己的有道智云账户与官方条款为准。
+有道现在只作为英式音标备用 Provider。用户在发音设置中主动切换到有道并填写 AppKey / 应用密钥后才会调用词典接口；实现不会读取、下载或播放 `ukSpeech` 音频。服务权限、计费和数据使用规则以用户自己的有道智云账户与官方条款为准。
 
 ## 自定义 OpenAI-compatible
 
@@ -67,3 +66,5 @@ TTS 只在用户点击发音按钮时调用，不会随每次选词自动请求�
 `POST {baseUrl}/chat/completions`
 
 以及标准 SSE 流式 `choices[0].delta.content`，即可直接使用。
+
+出于密钥传输安全考虑，自定义公网 Base URL 必须使用 HTTPS；只有 `localhost`、`127.0.0.1` 和 IPv6 回环地址允许 HTTP。流式响应还会受到总字节数、单条缓冲和累计输出长度限制。
