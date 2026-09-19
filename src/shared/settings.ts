@@ -17,15 +17,18 @@ export interface ProviderPreset {
   note: string;
 }
 
-export interface PromptDefinition {
+export interface PromptMetadata {
   id: string;
   name: string;
   description: string;
   applicableType: PromptApplicableType;
-  systemPrompt: string;
-  userTemplate: string;
   enabled: boolean;
   version: number;
+}
+
+export interface PromptDefinition extends PromptMetadata {
+  systemPrompt: string;
+  userTemplate: string;
 }
 
 export interface YoudaoSettings {
@@ -64,6 +67,21 @@ export interface LookupSettings {
   };
   prompts: {
     items: PromptDefinition[];
+    defaultWordPromptId: string;
+    defaultSentencePromptId: string;
+  };
+}
+
+export interface PublicLookupSettings {
+  ui: LookupSettings["ui"];
+  pronunciation: {
+    provider: PronunciationProviderId;
+    mimo: {
+      voice: MimoVoiceId;
+    };
+  };
+  prompts: {
+    items: PromptMetadata[];
     defaultWordPromptId: string;
     defaultSentencePromptId: string;
   };
@@ -205,6 +223,39 @@ export const DEFAULT_SETTINGS: LookupSettings = {
     defaultSentencePromptId: DEFAULT_SENTENCE_PROMPT_ID
   }
 };
+
+export function toPublicLookupSettings(settings: LookupSettings): PublicLookupSettings {
+  return {
+    ui: { ...settings.ui },
+    pronunciation: {
+      provider: settings.pronunciation.provider,
+      mimo: {
+        voice: settings.pronunciation.mimo.voice
+      }
+    },
+    prompts: {
+      items: settings.prompts.items.map(({
+        id,
+        name,
+        description,
+        applicableType,
+        enabled,
+        version
+      }) => ({
+        id,
+        name,
+        description,
+        applicableType,
+        enabled,
+        version
+      })),
+      defaultWordPromptId: settings.prompts.defaultWordPromptId,
+      defaultSentencePromptId: settings.prompts.defaultSentencePromptId
+    }
+  };
+}
+
+export const DEFAULT_PUBLIC_SETTINGS: PublicLookupSettings = toPublicLookupSettings(DEFAULT_SETTINGS);
 
 function isProviderId(value: unknown): value is ProviderId {
   return typeof value === "string" && value in PROVIDER_PRESETS;
@@ -396,6 +447,42 @@ export function promptsForKind(settings: LookupSettings, kind: SelectionKind): P
   return settings.prompts.items.filter(prompt =>
     prompt.enabled && (prompt.applicableType === kind || prompt.applicableType === "both")
   );
+}
+
+export function publicPromptsForKind(
+  settings: PublicLookupSettings,
+  kind: SelectionKind
+): PromptMetadata[] {
+  return settings.prompts.items.filter(prompt =>
+    prompt.enabled && (prompt.applicableType === kind || prompt.applicableType === "both")
+  );
+}
+
+export function resolvePublicPrompt(
+  settings: PublicLookupSettings,
+  kind: SelectionKind,
+  promptId?: string
+): PromptMetadata {
+  const candidates = publicPromptsForKind(settings, kind);
+  const defaultId = kind === "word"
+    ? settings.prompts.defaultWordPromptId
+    : settings.prompts.defaultSentencePromptId;
+  const chosen = candidates.find(item => item.id === promptId)
+    ?? candidates.find(item => item.id === defaultId)
+    ?? candidates[0];
+
+  if (chosen) return chosen;
+
+  const fallback = kind === "word" ? DEFAULT_PROMPTS[0] : DEFAULT_PROMPTS[1];
+  const {
+    id,
+    name,
+    description,
+    applicableType,
+    enabled,
+    version
+  } = fallback;
+  return { id, name, description, applicableType, enabled, version };
 }
 
 export function resolvePrompt(

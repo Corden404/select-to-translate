@@ -8,20 +8,61 @@ import type {
   LookupPortRequest,
   LookupPortResponse,
   OneShotMessage,
-  PronunciationResponse
+  PronunciationResponse,
+  PublicSettingsResponse
+} from "../shared/messages";
+import {
+  isLookupPortRequest,
+  recoverLookupRequestId
 } from "../shared/messages";
 import { buildLookupMessages, type ChatMessage } from "../shared/prompts";
-import { countEnglishWords } from "../shared/selection";
 import {
   AUTO_LOOKUP_STORAGE_KEY,
   DEFAULT_SETTINGS,
   SETTINGS_STORAGE_KEY,
-  loadLookupSettings
+  loadLookupSettings,
+  toPublicLookupSettings
 } from "../shared/settings";
+
+async function restrictLocalStorageAccess(): Promise<void> {
+  await chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+}
+
+void restrictLocalStorageAccess();
 
 async function getEnabled(): Promise<boolean> {
   const stored = await chrome.storage.local.get({ [AUTO_LOOKUP_STORAGE_KEY]: true });
   return stored[AUTO_LOOKUP_STORAGE_KEY] !== false;
+}
+
+async function getPublicState(): Promise<PublicSettingsResponse> {
+  const [enabled, settings] = await Promise.all([
+    getEnabled(),
+    loadLookupSettings()
+  ]);
+  return {
+    ok: true,
+    enabled,
+    settings: toPublicLookupSettings(settings)
+  };
+}
+
+async function broadcastPublicState(): Promise<void> {
+  const state = await getPublicState();
+  if (!state.settings) return;
+  const tabs = await chrome.tabs.query({});
+  await Promise.allSettled(tabs.map(async tab => {
+    if (typeof tab.id !== "number") return;
+    try {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: "PUBLIC_SETTINGS_CHANGED",
+        enabled: state.enabled,
+        settings: state.settings
+      });
+    } catch {
+      // Tabs without this extension's content script are expected.
+    }
+  }));
 }
 
 async function updateBadge(enabled: boolean): Promise<void> {
@@ -42,6 +83,7 @@ async function toggleEnabled(): Promise<void> {
 
 chrome.runtime.onInstalled.addListener(() => {
   void (async () => {
+    await restrictLocalStorageAccess();
     const stored = await chrome.storage.local.get([
       AUTO_LOOKUP_STORAGE_KEY,
       SETTINGS_STORAGE_KEY
@@ -61,7 +103,10 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  void getEnabled().then(updateBadge);
+  void (async () => {
+    await restrictLocalStorageAccess();
+    await updateBadge(await getEnabled());
+  })();
 });
 
 chrome.commands.onCommand.addListener(command => {
@@ -69,54 +114,14 @@ chrome.commands.onCommand.addListener(command => {
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local" || !changes[AUTO_LOOKUP_STORAGE_KEY]) return;
-  void updateBadge(changes[AUTO_LOOKUP_STORAGE_KEY].newValue !== false);
+  if (areaName !== "local") return;
+  if (changes[AUTO_LOOKUP_STORAGE_KEY]) {
+    void updateBadge(changes[AUTO_LOOKUP_STORAGE_KEY].newValue !== false);
+  }
+  if (changes[AUTO_LOOKUP_STORAGE_KEY] || changes[SETTINGS_STORAGE_KEY]) {
+    void broadcastPublicState();
+  }
 });
-
-function isSafeSourceUrl(value: string): boolean {
-  try {
-    const protocol = new URL(value).protocol;
-    return ["http:", "https:", "chrome-extension:", "local-pdf:", "about:"].includes(protocol);
-  } catch {
-    return false;
-  }
-}
-
-function validOptionalContext(value: unknown): boolean {
-  return value === undefined || (typeof value === "string" && value.length <= 12000);
-}
-
-function isLookupRequest(message: unknown): message is LookupPortRequest {
-  if (!message || typeof message !== "object") return false;
-  const candidate = message as Partial<LookupPortRequest>;
-  if (candidate.type === "CHAT_SEND") {
-    return typeof candidate.requestId === "string"
-      && candidate.requestId.length <= 100
-      && typeof candidate.message === "string"
-      && candidate.message.trim().length > 0
-      && candidate.message.length <= 4000;
-  }
-  if (candidate.type !== "LOOKUP_START") return false;
-  return typeof candidate.requestId === "string"
-    && candidate.requestId.length <= 100
-    && (!candidate.promptId || (typeof candidate.promptId === "string" && candidate.promptId.length <= 80))
-    && !!candidate.payload
-    && typeof candidate.payload.selectedText === "string"
-    && candidate.payload.selectedText.length <= 4000
-    && countEnglishWords(candidate.payload.selectedText) >= 1
-    && countEnglishWords(candidate.payload.selectedText) <= 30
-    && (candidate.payload.kind === "word" || candidate.payload.kind === "sentence")
-    && typeof candidate.payload.context?.currentSentence === "string"
-    && candidate.payload.context.currentSentence.length <= 12000
-    && validOptionalContext(candidate.payload.context.previousSentence)
-    && validOptionalContext(candidate.payload.context.nextSentence)
-    && (!candidate.payload.sourceType || candidate.payload.sourceType === "web" || candidate.payload.sourceType === "pdf")
-    && typeof candidate.payload.pageUrl === "string"
-    && candidate.payload.pageUrl.length <= 5000
-    && isSafeSourceUrl(candidate.payload.pageUrl)
-    && typeof candidate.payload.pageTitle === "string"
-    && candidate.payload.pageTitle.length <= 1000;
-}
 
 chrome.runtime.onConnect.addListener(port => {
   if (port.name !== "lookup-stream") return;
@@ -127,6 +132,7 @@ chrome.runtime.onConnect.addListener(port => {
   let conversation: ChatMessage[] = [];
   let activeRequestId = "";
   let streamInProgress = false;
+  let chatDispatchInProgress = false;
   let pendingAssistant = "";
   let streamMode: "lookup" | "chat" | null = null;
 
@@ -139,15 +145,16 @@ chrome.runtime.onConnect.addListener(port => {
     }
   };
 
-  const saveRecord = async () => {
-    if (!activeRecord) return;
-    activeRecord.updatedAt = Date.now();
-    await putHistoryRecord(activeRecord);
+  const saveRecord = async (record: LookupHistoryRecord | null = activeRecord) => {
+    if (!record) return;
+    record.updatedAt = Date.now();
+    await putHistoryRecord(record);
   };
 
   const abortStreaming = () => {
-    controller?.abort();
-    controller = null;
+    const current = controller;
+    current?.abort();
+    if (controller === current) controller = null;
   };
 
   port.onDisconnect.addListener(() => {
@@ -175,14 +182,19 @@ chrome.runtime.onConnect.addListener(port => {
     settings: Awaited<ReturnType<typeof loadLookupSettings>>
   ): Promise<void> {
     abortStreaming();
-    controller = new AbortController();
+    const streamController = new AbortController();
+    const record = activeRecord;
+    const streamConversation = conversation;
+    if (!record) throw new Error("当前会话已经结束，请重新选择文本。");
+    controller = streamController;
     streamInProgress = true;
     streamMode = mode;
     pendingAssistant = "";
     let assistant = "";
+    const ownsStream = () => controller === streamController;
 
     safePost(mode === "lookup"
-      ? { type: "LOOKUP_STARTED", requestId, recordId: activeRecord!.id, promptId: activeRecord!.prompt.id, promptName: activeRecord!.prompt.name }
+      ? { type: "LOOKUP_STARTED", requestId, recordId: record.id, promptId: record.prompt.id, promptName: record.prompt.name }
       : { type: "CHAT_STARTED", requestId });
 
     try {
@@ -192,10 +204,11 @@ chrome.runtime.onConnect.addListener(port => {
           apiKey: settings.api.apiKey,
           model: settings.api.model,
           timeoutMs: settings.api.timeoutMs,
-          messages: conversation
+          messages: streamConversation
         },
-        controller.signal,
+        streamController.signal,
         text => {
+          if (!ownsStream() || streamController.signal.aborted) return;
           assistant += text;
           pendingAssistant = assistant;
           safePost(mode === "lookup"
@@ -204,41 +217,79 @@ chrome.runtime.onConnect.addListener(port => {
         }
       );
 
-      conversation.push({ role: "assistant", content: assistant });
-      activeRecord!.messages = [...conversation];
-      if (mode === "lookup") activeRecord!.initialResponse = assistant;
-      activeRecord!.status = "completed";
-      activeRecord!.errorMessage = undefined;
+      if (!ownsStream() || streamController.signal.aborted) return;
+      streamConversation.push({ role: "assistant", content: assistant });
+      record.messages = [...streamConversation];
+      if (mode === "lookup") record.initialResponse = assistant;
+      record.status = "completed";
+      record.errorMessage = undefined;
+      controller = null;
       streamInProgress = false;
       pendingAssistant = "";
       streamMode = null;
-      await saveRecord();
+      await saveRecord(record);
 
       safePost(mode === "lookup"
         ? { type: "LOOKUP_DONE", requestId }
         : { type: "CHAT_DONE", requestId });
     } catch (error) {
-      if (controller.signal.aborted) return;
+      if (streamController.signal.aborted || !ownsStream()) return;
+      controller = null;
       streamInProgress = false;
       pendingAssistant = "";
       streamMode = null;
-      activeRecord!.status = "error";
-      activeRecord!.errorMessage = error instanceof Error ? error.message : "未知错误";
+      record.status = "error";
+      record.errorMessage = error instanceof Error ? error.message : "未知错误";
       if (assistant) {
-        conversation.push({ role: "assistant", content: assistant });
-        activeRecord!.messages = [...conversation];
+        streamConversation.push({ role: "assistant", content: assistant });
+        record.messages = [...streamConversation];
       }
-      await saveRecord();
-      safePost({
+      await saveRecord(record);
+      safePost(mode === "lookup" ? {
         type: "LOOKUP_ERROR",
         requestId,
-        message: activeRecord!.errorMessage
+        message: record.errorMessage
+      } : {
+        type: "CHAT_ERROR",
+        requestId,
+        message: record.errorMessage
       });
     }
   }
 
   port.onMessage.addListener((message: unknown) => {
-    if (!isLookupRequest(message)) return;
+    const rawType = message && typeof message === "object"
+      ? (message as { type?: unknown }).type
+      : undefined;
+    const recoverableRequestId = recoverLookupRequestId(message);
+    if (!isLookupPortRequest(message)) {
+      if (recoverableRequestId && rawType === "LOOKUP_START") {
+        safePost({
+          type: "LOOKUP_ERROR",
+          requestId: recoverableRequestId,
+          message: "查词请求数据无效或超过长度限制。"
+        });
+      } else if (recoverableRequestId && rawType === "CHAT_SEND") {
+        safePost({
+          type: "CHAT_ERROR",
+          requestId: recoverableRequestId,
+          message: "追问内容无效或超过长度限制。"
+        });
+      }
+      return;
+    }
+
+    if (message.type === "CHAT_SEND") {
+      if (streamInProgress || chatDispatchInProgress) {
+        safePost({
+          type: "CHAT_ERROR",
+          requestId: message.requestId,
+          message: "上一条回复仍在生成，请稍后再发送。"
+        });
+        return;
+      }
+      chatDispatchInProgress = true;
+    }
 
     void (async () => {
       if (message.type === "LOOKUP_START") {
@@ -277,7 +328,7 @@ chrome.runtime.onConnect.addListener(port => {
 
       if (!activeRecord || message.requestId !== activeRequestId) {
         safePost({
-          type: "LOOKUP_ERROR",
+          type: "CHAT_ERROR",
           requestId: message.requestId,
           message: "当前会话已经结束，请重新选择文本。"
         });
@@ -294,10 +345,12 @@ chrome.runtime.onConnect.addListener(port => {
       await streamAssistant(message.requestId, "chat", settings);
     })().catch(error => {
       safePost({
-        type: "LOOKUP_ERROR",
+        type: message.type === "CHAT_SEND" ? "CHAT_ERROR" : "LOOKUP_ERROR",
         requestId: (message as LookupPortRequest).requestId,
         message: error instanceof Error ? error.message : "处理请求失败"
       });
+    }).finally(() => {
+      if (message.type === "CHAT_SEND") chatDispatchInProgress = false;
     });
   });
 });
@@ -305,7 +358,7 @@ chrome.runtime.onConnect.addListener(port => {
 chrome.runtime.onMessage.addListener((
   message: OneShotMessage,
   sender,
-  sendResponse: (response: PronunciationResponse | ConnectionTestResponse) => void
+  sendResponse: (response: PronunciationResponse | ConnectionTestResponse | PublicSettingsResponse) => void
 ) => {
   if (!message || typeof message !== "object" || typeof message.type !== "string") {
     return false;
@@ -325,6 +378,19 @@ chrome.runtime.onMessage.addListener((
   }
 
   void (async () => {
+    if (message.type === "PUBLIC_SETTINGS_GET") {
+      try {
+        sendResponse(await getPublicState());
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          enabled: false,
+          message: error instanceof Error ? error.message : "无法读取公开设置。"
+        });
+      }
+      return;
+    }
+
     if (message.type === "TEST_LLM_CONNECTION") {
       const startedAt = performance.now();
       try {

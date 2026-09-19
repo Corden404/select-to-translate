@@ -64,6 +64,36 @@ function extractContent(json: unknown): string {
   return typeof content === "string" ? content : "";
 }
 
+function extractStreamError(json: unknown): LlmRequestError | null {
+  if (!json || typeof json !== "object") return null;
+  const raw = (json as { error?: unknown }).error;
+  if (!raw) return null;
+
+  const error = typeof raw === "object" && raw
+    ? raw as { message?: unknown; code?: unknown; type?: unknown }
+    : {};
+  const detail = typeof error.message === "string" ? error.message.trim().slice(0, 300) : "";
+  const marker = [error.code, error.type]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+  const suffix = detail ? `：${detail}` : "";
+
+  if (/auth|unauthor|api.?key|permission|forbidden/.test(marker)) {
+    return new LlmRequestError(`模型流返回鉴权错误${suffix}`, "auth");
+  }
+  if (/rate|thrott/.test(marker)) {
+    return new LlmRequestError(`模型流返回限流错误${suffix}`, "rate_limit");
+  }
+  if (/quota|credit|balance/.test(marker)) {
+    return new LlmRequestError(`模型流返回配额错误${suffix}`, "quota");
+  }
+  if (/server|internal|unavailable/.test(marker)) {
+    return new LlmRequestError(`模型流返回服务端错误${suffix}`, "server");
+  }
+  return new LlmRequestError(`模型流返回错误${suffix}`, "protocol");
+}
+
 function mapHttpError(status: number, details: string): LlmRequestError {
   const suffix = details ? `：${details.slice(0, 500)}` : "";
   if (status === 401 || status === 403) {
@@ -168,19 +198,25 @@ export async function streamOpenAiCompatible(
       if (!data) return false;
       if (data === "[DONE]") return true;
 
+      let parsed: unknown;
       try {
-        const text = extractContent(JSON.parse(data));
-        if (text) {
-          sawData = true;
-          onChunk(text);
-        }
+        parsed = JSON.parse(data);
       } catch {
         // Ignore keepalive records. If the whole stream is incompatible we fail below.
+        return false;
+      }
+      const streamError = extractStreamError(parsed);
+      if (streamError) throw streamError;
+      const text = extractContent(parsed);
+      if (text) {
+        sawData = true;
+        onChunk(text);
       }
       return false;
     };
 
-    while (true) {
+    let sawDone = false;
+    while (!sawDone) {
       let result: ReadableStreamReadResult<Uint8Array>;
       try {
         result = await reader.read();
@@ -197,12 +233,17 @@ export async function streamOpenAiCompatible(
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
       for (const line of lines) {
-        if (consumeLine(line)) return;
+        if (consumeLine(line)) {
+          sawDone = true;
+          break;
+        }
       }
     }
 
-    buffer += decoder.decode();
-    if (buffer) consumeLine(buffer);
+    if (!sawDone) {
+      buffer += decoder.decode();
+      if (buffer) consumeLine(buffer);
+    }
     if (!sawData) {
       throw new LlmRequestError("模型返回了无法识别的流格式。", "protocol");
     }

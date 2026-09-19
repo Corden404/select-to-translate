@@ -6,41 +6,52 @@ import type {
   LookupRequestPayload,
   PronunciationResponse
 } from "../shared/messages";
+import {
+  clampLookupPayload,
+  isPublicSettingsChangedMessage,
+  isPublicSettingsResponse,
+  LOOKUP_PROTOCOL_LIMITS
+} from "../shared/messages";
 import { classifySelection } from "../shared/selection";
 import {
-  AUTO_LOOKUP_STORAGE_KEY,
-  DEFAULT_SETTINGS,
-  SETTINGS_STORAGE_KEY,
-  loadLookupSettings,
-  normalizeSettings,
-  resolvePrompt,
-  type LookupSettings
+  DEFAULT_PUBLIC_SETTINGS,
+  resolvePublicPrompt,
+  type PublicLookupSettings
 } from "../shared/settings";
 
 let enabled = true;
 let scheduled: number | null = null;
 let lastFingerprint = "";
+let suppressLookupUntil = 0;
 let activePort: chrome.runtime.Port | null = null;
 let activeRequestId = "";
-let settings: LookupSettings = DEFAULT_SETTINGS;
+let settings: PublicLookupSettings = DEFAULT_PUBLIC_SETTINGS;
 
 const pronunciationCache = new Map<string, PronunciationResponse>();
 
 const card = new FloatingCard({
   onRegenerate: (query, promptId) => startLookup(query, promptId),
   onPromptChange: (query, promptId) => startLookup(query, promptId),
+  onKindChange: (query, promptId) => startLookup(query, promptId),
   onFollowUp: message => sendFollowUp(message),
   onPronounce: word => getPronunciation(word),
-  onDismiss: () => cancelActiveRequest()
+  onDismiss: () => {
+    lastFingerprint = "";
+    suppressLookupUntil = performance.now() + 180;
+    cancelActiveRequest();
+  }
 });
 
 async function loadState(): Promise<void> {
-  const [stored, loadedSettings] = await Promise.all([
-    chrome.storage.local.get({ [AUTO_LOOKUP_STORAGE_KEY]: true }),
-    loadLookupSettings()
-  ]);
-  enabled = stored[AUTO_LOOKUP_STORAGE_KEY] !== false;
-  settings = loadedSettings;
+  const response = await chrome.runtime.sendMessage({
+    type: "PUBLIC_SETTINGS_GET"
+  });
+  if (!isPublicSettingsResponse(response) || !response.ok || !response.settings) {
+    enabled = false;
+    return;
+  }
+  enabled = response.enabled;
+  settings = response.settings;
   card.setAppearance(settings.ui);
   if (!enabled) card.hide();
 }
@@ -80,12 +91,14 @@ function getSourceMetadata(): {
 function runLookup(): void {
   scheduled = null;
   if (!enabled) return;
+  if (performance.now() < suppressLookupUntil) return;
 
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
 
   const classified = classifySelection(selection.toString());
   if (!classified) return;
+  if (classified.text.length > LOOKUP_PROTOCOL_LIMITS.selectedText) return;
 
   const anchor = getSelectionAnchor(selection);
   if (!anchor) return;
@@ -95,9 +108,15 @@ function runLookup(): void {
   lastFingerprint = nextFingerprint;
 
   cancelActiveRequest();
-  const context = extractContext(selection, classified.kind, classified.text);
-  const query: CardQuery = { selection: classified, context };
-  const prompt = resolvePrompt(settings, classified.kind);
+  const sentenceContext = extractContext(selection, "sentence", classified.text);
+  const context = classified.kind === "sentence"
+    ? sentenceContext
+    : {
+        currentSentence: sentenceContext.currentSentence,
+        quality: sentenceContext.quality
+      };
+  const query: CardQuery = { selection: classified, context, sentenceContext };
+  const prompt = resolvePublicPrompt(settings, classified.kind);
   card.show(query, anchor, settings, prompt.id);
   startLookup(query, prompt.id);
 
@@ -113,14 +132,14 @@ function startLookup(query: CardQuery, promptId?: string): void {
   card.beginLoading();
 
   const source = getSourceMetadata();
-  const payload: LookupRequestPayload = {
+  const payload = clampLookupPayload({
     selectedText: query.selection.text,
     kind: query.selection.kind,
     context: query.context,
     pageUrl: source.pageUrl,
     pageTitle: source.pageTitle,
     sourceType: source.sourceType
-  };
+  } satisfies LookupRequestPayload);
 
   port.onMessage.addListener((message: LookupPortResponse) => {
     if (message.requestId !== activeRequestId) return;
@@ -144,9 +163,11 @@ function startLookup(query: CardQuery, promptId?: string): void {
       case "CHAT_DONE":
         card.chatDone();
         break;
+      case "CHAT_ERROR":
+        card.chatError(message.message);
+        break;
       case "LOOKUP_ERROR":
         card.showError(message.message);
-        card.chatDone();
         break;
     }
   });
@@ -166,16 +187,16 @@ function startLookup(query: CardQuery, promptId?: string): void {
   });
 }
 
-function sendFollowUp(message: string): void {
+function sendFollowUp(message: string): boolean {
   if (!activePort || !activeRequestId) {
-    card.showError("当前会话已经结束，请重新选择文本。");
-    return;
+    return false;
   }
   activePort.postMessage({
     type: "CHAT_SEND",
     requestId: activeRequestId,
     message
   });
+  return true;
 }
 
 async function getPronunciation(word: string): Promise<PronunciationResponse> {
@@ -211,20 +232,16 @@ document.addEventListener("keyup", event => {
 window.addEventListener("resize", () => card.reposition());
 window.addEventListener("scroll", () => card.reposition(), true);
 
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local") return;
-
-  if (changes[AUTO_LOOKUP_STORAGE_KEY]) {
-    enabled = changes[AUTO_LOOKUP_STORAGE_KEY].newValue !== false;
-    lastFingerprint = "";
-    if (!enabled) card.hide();
-  }
-
-  if (changes[SETTINGS_STORAGE_KEY]) {
-    settings = normalizeSettings(changes[SETTINGS_STORAGE_KEY].newValue);
-    pronunciationCache.clear();
-    card.setAppearance(settings.ui);
-  }
+chrome.runtime.onMessage.addListener((message: unknown) => {
+  if (!isPublicSettingsChangedMessage(message)) return;
+  enabled = message.enabled;
+  settings = message.settings;
+  lastFingerprint = "";
+  pronunciationCache.clear();
+  card.setAppearance(settings.ui);
+  if (!enabled) card.hide();
 });
 
-void loadState();
+void loadState().catch(() => {
+  enabled = false;
+});

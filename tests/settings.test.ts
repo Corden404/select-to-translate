@@ -3,7 +3,8 @@ import {
   DEFAULT_SENTENCE_PROMPT_ID,
   DEFAULT_WORD_PROMPT_ID,
   normalizeSettings,
-  resolvePrompt
+  resolvePrompt,
+  toPublicLookupSettings
 } from "../src/shared/settings";
 
 describe("settings migration and prompt routing", () => {
@@ -77,5 +78,36 @@ describe("settings migration and prompt routing", () => {
     expect(resolvePrompt(settings, "word", "word-b").systemPrompt).toBe("B");
     expect(resolvePrompt(normalizeSettings({}), "word").id).toBe(DEFAULT_WORD_PROMPT_ID);
     expect(resolvePrompt(normalizeSettings({}), "sentence").id).toBe(DEFAULT_SENTENCE_PROMPT_ID);
+  });
+
+  it("strips all credentials, model config, and prompt bodies from public settings", () => {
+    const settings = normalizeSettings({
+      api: {
+        provider: "mimo",
+        apiKey: "llm-secret",
+        baseUrl: "https://private.example/v1",
+        model: "private-model"
+      },
+      pronunciation: {
+        provider: "youdao",
+        mimo: { apiKey: "tts-secret" },
+        youdao: {
+          enabled: true,
+          appKey: "youdao-key",
+          appSecret: "youdao-secret"
+        }
+      }
+    });
+    const publicSettings = toPublicLookupSettings(settings);
+    const serialized = JSON.stringify(publicSettings);
+
+    expect(serialized).not.toContain("llm-secret");
+    expect(serialized).not.toContain("tts-secret");
+    expect(serialized).not.toContain("youdao-key");
+    expect(serialized).not.toContain("youdao-secret");
+    expect(serialized).not.toContain("private-model");
+    expect(serialized).not.toContain("private.example");
+    expect(serialized).not.toContain("systemPrompt");
+    expect(serialized).not.toContain("userTemplate");
   });
 });

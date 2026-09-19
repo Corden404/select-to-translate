@@ -37,6 +37,8 @@ function createPdf(text: string): Buffer {
 test("extension lookup, streaming chat, history, settings, and PDF work end to end", async () => {
   const textPdf = createPdf("A PDF reader can detect words in context.");
   const blankPdf = createPdf("");
+  let initialLookupRequests = 0;
+  let followUpRequests = 0;
 
   const server = createServer((req, res) => {
     if (req.url === "/sample.pdf" || req.url === "/blank.pdf") {
@@ -84,6 +86,11 @@ test("extension lookup, streaming chat, history, settings, and PDF work end to e
         const connectionTest = Boolean(body.messages?.some(message =>
           message.content?.includes("connection test")
         ));
+        if (followUp) {
+          followUpRequests += 1;
+        } else if (!connectionTest) {
+          initialLookupRequests += 1;
+        }
         const parts = connectionTest
           ? ["OK"]
           : followUp
@@ -152,6 +159,35 @@ test("extension lookup, streaming chat, history, settings, and PDF work end to e
     await popup.locator("#save").click();
     await expect(popup.locator("#status")).toHaveText("已保存。");
 
+    const invalidLookupResponse = await popup.evaluate(() => new Promise<unknown>(resolve => {
+      const port = chrome.runtime.connect({ name: "lookup-stream" });
+      const timeout = window.setTimeout(() => {
+        port.disconnect();
+        resolve(null);
+      }, 1500);
+      port.onMessage.addListener(message => {
+        window.clearTimeout(timeout);
+        port.disconnect();
+        resolve(message);
+      });
+      port.postMessage({
+        type: "LOOKUP_START",
+        requestId: "invalid-e2e-request",
+        payload: {
+          selectedText: "detect",
+          kind: "word",
+          context: { currentSentence: "This tool can detect words in context." },
+          pageUrl: "https://example.com",
+          pageTitle: "x".repeat(1001),
+          sourceType: "web"
+        }
+      });
+    }));
+    expect(invalidLookupResponse).toMatchObject({
+      type: "LOOKUP_ERROR",
+      requestId: "invalid-e2e-request"
+    });
+
     const page = await context.newPage();
     await page.goto(origin + "/", { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => Boolean(document.getElementById("__selection_lookup_root__")));
@@ -186,17 +222,48 @@ test("extension lookup, streaming chat, history, settings, and PDF work end to e
 
     expect(displayLatencyMs).toBeLessThan(250);
     await expect(page.locator("#__selection_lookup_root__ .body")).toHaveText("初始解释");
+    expect(initialLookupRequests).toBe(1);
+
+    await page.locator("#__selection_lookup_root__ .close").click();
+    await page.waitForTimeout(220);
+    await page.evaluate(() => {
+      const paragraph = document.getElementById("p")!;
+      const node = paragraph.firstChild!;
+      const text = node.textContent!;
+      const start = text.indexOf("detect");
+      const range = document.createRange();
+      range.setStart(node, start);
+      range.setEnd(node, start + "detect".length);
+      const selection = getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    await expect(page.locator("#__selection_lookup_root__ .body")).toHaveText("初始解释");
+    await expect.poll(() => initialLookupRequests).toBe(2);
+
+    await page.locator("#__selection_lookup_root__ .kind").selectOption("sentence");
+    await expect(page.locator("#__selection_lookup_root__ .kind")).toHaveValue("sentence");
+    await expect(page.locator("#__selection_lookup_root__ .body")).toHaveText("初始解释");
+    await expect.poll(() => initialLookupRequests).toBe(3);
 
     await page.locator("#__selection_lookup_root__ .follow-up").click();
     await page.locator("#__selection_lookup_root__ .chat-input").fill("为什么？");
-    await page.locator("#__selection_lookup_root__ .send").click();
+    await page.evaluate(() => {
+      const host = document.getElementById("__selection_lookup_root__")!;
+      const shadow = host.shadowRoot!;
+      const send = shadow.querySelector<HTMLButtonElement>(".send")!;
+      send.click();
+      send.click();
+    });
     await expect(page.locator("#__selection_lookup_root__ .bubble.assistant").last()).toHaveText("追问回答");
+    await expect.poll(() => followUpRequests).toBe(1);
 
     const history = await context.newPage();
     await history.goto("chrome-extension://" + extensionId + "/history.html");
-    await expect(history.getByText("detect", { exact: true })).toBeVisible();
-    await history.getByText("detect", { exact: true }).click();
-    await expect(history.getByText("初始解释", { exact: true })).toBeVisible();
+    await expect(history.getByText("detect", { exact: true }).first()).toBeVisible();
+    await history.getByText("detect", { exact: true }).first().click();
+    await expect(history.getByText("初始解释", { exact: true }).first()).toBeVisible();
     await expect(history.getByText("追问回答", { exact: true })).toBeVisible();
 
     const pdf = await context.newPage();

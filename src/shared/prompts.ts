@@ -19,11 +19,16 @@ function contextText(payload: LookupRequestPayload): string {
 }
 
 export function renderUserTemplate(prompt: PromptDefinition, payload: LookupRequestPayload): string {
-  return prompt.userTemplate
-    .replaceAll("{{context}}", contextText(payload))
-    .replaceAll("{{selection}}", payload.selectedText)
-    .replaceAll("{{pageTitle}}", payload.pageTitle)
-    .replaceAll("{{pageUrl}}", payload.pageUrl);
+  const replacements: Record<string, string> = {
+    context: contextText(payload),
+    selection: payload.selectedText,
+    pageTitle: payload.pageTitle,
+    pageUrl: payload.pageUrl
+  };
+  return prompt.userTemplate.replace(
+    /\{\{(context|selection|pageTitle|pageUrl)\}\}/g,
+    (match, key: string) => replacements[key] ?? match
+  );
 }
 
 export function buildLookupMessages(

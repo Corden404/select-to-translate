@@ -83,6 +83,52 @@ describe("OpenAI-compatible provider config", () => {
     }
   });
 
+  it("rejects an SSE stream that only sends DONE", async () => {
+    const originalFetch = globalThis.fetch;
+    const encoder = new TextEncoder();
+    globalThis.fetch = async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      }
+    }), { status: 200 });
+
+    try {
+      await expect(testOpenAiCompatibleConnection({
+        baseUrl: "https://example.com/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        timeoutMs: 5000
+      })).rejects.toMatchObject({ code: "protocol" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("surfaces SSE error objects instead of treating them as empty keepalives", async () => {
+    const originalFetch = globalThis.fetch;
+    const encoder = new TextEncoder();
+    globalThis.fetch = async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          'data: {"error":{"type":"authentication_error","message":"invalid credentials"}}\n\n'
+        ));
+        controller.close();
+      }
+    }), { status: 200 });
+
+    try {
+      await expect(testOpenAiCompatibleConnection({
+        baseUrl: "https://example.com/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        timeoutMs: 5000
+      })).rejects.toMatchObject({ code: "auth" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("does not append the path twice", () => {
     expect(buildChatCompletionsUrl("https://example.com/v1/chat/completions"))
       .toBe("https://example.com/v1/chat/completions");

@@ -31,6 +31,18 @@ describe("selection helpers", () => {
     expect(classifySelection("This is a complete sentence.")?.kind).toBe("sentence");
   });
 
+  it("classifies short complete clauses without punctuation as sentences", () => {
+    expect(classifySelection("I love this book")?.kind).toBe("sentence");
+    expect(classifySelection("You are absolutely right")?.kind).toBe("sentence");
+    expect(classifySelection("I agree")?.kind).toBe("sentence");
+  });
+
+  it("keeps short lexical phrases in word mode", () => {
+    expect(classifySelection("take for granted")?.kind).toBe("word");
+    expect(classifySelection("in the morning")?.kind).toBe("word");
+    expect(classifySelection("absolutely right")?.kind).toBe("word");
+  });
+
   it("rejects selections above 30 English words", () => {
     const text = Array.from({ length: 31 }, (_, index) => `word${index}`).join(" ");
     expect(classifySelection(text)).toBeNull();

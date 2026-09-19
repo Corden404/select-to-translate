@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildLookupMessages } from "../src/shared/prompts";
-import { DEFAULT_SETTINGS } from "../src/shared/settings";
+import { buildLookupMessages, renderUserTemplate } from "../src/shared/prompts";
+import { DEFAULT_PROMPTS, DEFAULT_SETTINGS } from "../src/shared/settings";
 
 describe("lookup prompt construction", () => {
   it("marks page context as untrusted for word lookup", () => {
@@ -35,5 +35,25 @@ describe("lookup prompt construction", () => {
 
     expect(messages[1].content).toContain("Before.");
     expect(messages[1].content).toContain("After.");
+  });
+
+  it("expands only placeholders present in the original template", () => {
+    const rendered = renderUserTemplate({
+      ...DEFAULT_PROMPTS[0],
+      userTemplate: "CTX={{context}}\nSEL={{selection}}"
+    }, {
+      selectedText: "detect {{pageTitle}}",
+      kind: "word",
+      context: {
+        currentSentence: "Context contains {{pageUrl}} and {{selection}}."
+      },
+      pageUrl: "https://secret.example/path",
+      pageTitle: "Sensitive title"
+    });
+
+    expect(rendered).toContain("Context contains {{pageUrl}} and {{selection}}.");
+    expect(rendered).toContain("detect {{pageTitle}}");
+    expect(rendered).not.toContain("https://secret.example/path");
+    expect(rendered).not.toContain("Sensitive title");
   });
 });

@@ -1,25 +1,27 @@
 import type { PronunciationResponse } from "../shared/messages";
 import {
-  promptsForKind,
-  type LookupSettings,
+  publicPromptsForKind,
+  type PublicLookupSettings,
   type UiFontSize,
   type UiTheme
 } from "../shared/settings";
 import type { AnchorPoint } from "./anchor";
 import type { ExtractedContext } from "./context-extractor";
-import type { ClassifiedSelection } from "../shared/selection";
+import type { ClassifiedSelection, SelectionKind } from "../shared/selection";
 
 const HOST_ID = "__selection_lookup_root__";
 
 export interface CardQuery {
   selection: ClassifiedSelection;
   context: ExtractedContext;
+  sentenceContext?: ExtractedContext;
 }
 
 interface FloatingCardCallbacks {
   onRegenerate?: (query: CardQuery, promptId: string) => void;
   onPromptChange?: (query: CardQuery, promptId: string) => void;
-  onFollowUp?: (message: string) => void;
+  onKindChange?: (query: CardQuery, promptId: string) => void;
+  onFollowUp?: (message: string) => boolean;
   onPronounce?: (word: string) => Promise<PronunciationResponse>;
   onDismiss?: () => void;
 }
@@ -31,6 +33,7 @@ export class FloatingCard {
   private body: HTMLDivElement;
   private status: HTMLSpanElement;
   private pinButton: HTMLButtonElement;
+  private kindSelect: HTMLSelectElement;
   private promptSelect: HTMLSelectElement;
   private pronunciationRow: HTMLDivElement;
   private pronunciationText: HTMLSpanElement;
@@ -42,6 +45,7 @@ export class FloatingCard {
   private sendButton: HTMLButtonElement;
   private anchor: AnchorPoint | null = null;
   private lastQuery: CardQuery | null = null;
+  private publicSettings: PublicLookupSettings | null = null;
   private pinned = false;
   private themePreference: UiTheme = "dark";
   private initialResponseText = "";
@@ -86,7 +90,7 @@ export class FloatingCard {
           box-shadow:0 14px 38px rgba(0,0,0,.18); color-scheme:light;
         }
         .header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
-        .kind { padding:2px 8px; border-radius:999px; background:var(--accent-soft); font-size:.75em; font-weight:750; }
+        .kind { padding:3px 7px; border:1px solid var(--border); border-radius:999px; background:var(--accent-soft); color:var(--text); font-size:.75em; font-weight:750; }
         .status { flex:1; min-width:0; color:var(--muted); font-size:.76em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         button, select, textarea { font:inherit; }
         button { border:0; border-radius:8px; padding:5px 9px; background:var(--bg-soft); color:var(--text); cursor:pointer; }
@@ -112,7 +116,11 @@ export class FloatingCard {
       </style>
       <div class="card" data-theme="dark" role="dialog" aria-label="查词结果">
         <div class="header">
-          <span class="kind"></span><span class="status">准备查询</span>
+          <select class="kind" aria-label="解释模式">
+            <option value="word">词 / 词组</option>
+            <option value="sentence">句子</option>
+          </select>
+          <span class="status">准备查询</span>
           <button class="icon pin" type="button" aria-label="固定窗口" aria-pressed="false" title="固定窗口">📌</button>
           <button class="icon close" type="button" aria-label="关闭" title="关闭">×</button>
         </div>
@@ -139,6 +147,7 @@ export class FloatingCard {
     this.body = this.shadow.querySelector(".body") as HTMLDivElement;
     this.status = this.shadow.querySelector(".status") as HTMLSpanElement;
     this.pinButton = this.shadow.querySelector(".pin") as HTMLButtonElement;
+    this.kindSelect = this.shadow.querySelector(".kind") as HTMLSelectElement;
     this.promptSelect = this.shadow.querySelector(".prompt") as HTMLSelectElement;
     this.pronunciationRow = this.shadow.querySelector(".pronunciation") as HTMLDivElement;
     this.pronunciationText = this.shadow.querySelector(".phonetic") as HTMLSpanElement;
@@ -159,6 +168,9 @@ export class FloatingCard {
     });
     this.promptSelect.addEventListener("change", () => {
       if (this.lastQuery) this.callbacks.onPromptChange?.(this.lastQuery, this.promptSelect.value);
+    });
+    this.kindSelect.addEventListener("change", () => {
+      this.changeKind(this.kindSelect.value as SelectionKind);
     });
     this.followUpButton.addEventListener("click", () => this.openChat());
     this.sendButton.addEventListener("click", () => this.submitFollowUp());
@@ -183,29 +195,29 @@ export class FloatingCard {
     this.hide();
   }
 
-  setAppearance(settings: LookupSettings["ui"]): void {
+  setAppearance(settings: PublicLookupSettings["ui"]): void {
     this.themePreference = settings.theme;
     this.applyResolvedTheme();
     const sizes: Record<UiFontSize,string> = { small:"13px", medium:"15px", large:"17px" };
     this.card.style.setProperty("--lookup-font-size", sizes[settings.fontSize]);
   }
 
-  show(query: CardQuery, anchor: AnchorPoint, settings: LookupSettings, promptId?: string): void {
+  show(query: CardQuery, anchor: AnchorPoint, settings: PublicLookupSettings, promptId?: string): void {
     this.lastQuery = query;
     this.anchor = anchor;
+    this.publicSettings = settings;
     this.host.style.display = "block";
     this.resetChat();
 
-    const kind = this.shadow.querySelector(".kind") as HTMLSpanElement;
     const selected = this.shadow.querySelector(".selected") as HTMLDivElement;
     const context = this.shadow.querySelector(".context") as HTMLDivElement;
-    kind.textContent = query.selection.kind === "word" ? "单词" : "句子";
+    this.kindSelect.value = query.selection.kind;
     selected.textContent = query.selection.text;
     context.textContent = query.selection.kind === "word"
       ? `语境：${query.context.currentSentence}`
       : `上下文：${[query.context.previousSentence,query.context.currentSentence,query.context.nextSentence].filter(Boolean).join(" ")}`;
 
-    const prompts = promptsForKind(settings, query.selection.kind);
+    const prompts = publicPromptsForKind(settings, query.selection.kind);
     this.promptSelect.replaceChildren(...prompts.map(prompt => {
       const option = document.createElement("option");
       option.value = prompt.id;
@@ -290,6 +302,14 @@ export class FloatingCard {
     this.chatInput.focus();
   }
 
+  chatError(message: string): void {
+    this.sendButton.disabled = false;
+    this.chatInput.disabled = false;
+    this.chatAssistantBubble = null;
+    this.appendBubble("assistant", message);
+    this.chatInput.focus();
+  }
+
   hide(): void {
     if (!this.isVisible()) return;
     this.host.style.display = "none";
@@ -348,9 +368,36 @@ export class FloatingCard {
     const message = this.chatInput.value.trim();
     if (!message || this.sendButton.disabled) return;
     this.openChat();
+    this.sendButton.disabled = true;
+    this.chatInput.disabled = true;
     this.appendBubble("user", message);
     this.chatInput.value = "";
-    this.callbacks.onFollowUp?.(message);
+    const accepted = this.callbacks.onFollowUp?.(message) ?? false;
+    if (!accepted) {
+      this.chatError("当前会话已经结束，请重新选择文本。");
+    }
+  }
+
+  private changeKind(kind: SelectionKind): void {
+    if (!this.lastQuery || !this.anchor || !this.publicSettings || this.lastQuery.selection.kind === kind) {
+      return;
+    }
+    const sentenceContext = this.lastQuery.sentenceContext ?? this.lastQuery.context;
+    const context = kind === "sentence"
+      ? sentenceContext
+      : {
+          currentSentence: sentenceContext.currentSentence,
+          quality: sentenceContext.quality
+        };
+    const query: CardQuery = {
+      selection: { ...this.lastQuery.selection, kind },
+      context,
+      sentenceContext
+    };
+    const anchor = this.anchor;
+    const settings = this.publicSettings;
+    this.show(query, anchor, settings);
+    this.callbacks.onKindChange?.(query, this.promptSelect.value);
   }
 
   private appendBubble(role: "user" | "assistant", text: string): HTMLDivElement {
