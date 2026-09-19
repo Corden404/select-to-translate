@@ -45,3 +45,20 @@ export function buildLookupMessages(
     ]
   };
 }
+
+export function buildSpeechExplanationMessages(
+  settings: LookupSettings,
+  payload: LookupRequestPayload
+): ChatMessage[] {
+  return [
+    {
+      role: "system",
+      content: settings.speechExplanation.prompt
+        + "\n\nMandatory output rule: Respond entirely in English. Do not use Chinese or any other language."
+    },
+    {
+      role: "user",
+      content: `[UNTRUSTED READING CONTEXT]\n${contextText(payload)}\n\n[SELECTED TEXT]\n${payload.selectedText}`
+    }
+  ];
+}

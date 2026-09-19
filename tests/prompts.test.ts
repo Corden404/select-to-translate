@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildLookupMessages, renderUserTemplate } from "../src/shared/prompts";
+import {
+  buildLookupMessages,
+  buildSpeechExplanationMessages,
+  renderUserTemplate
+} from "../src/shared/prompts";
 import { DEFAULT_PROMPTS, DEFAULT_SETTINGS } from "../src/shared/settings";
 
 describe("lookup prompt construction", () => {
@@ -35,6 +39,28 @@ describe("lookup prompt construction", () => {
 
     expect(messages[1].content).toContain("Before.");
     expect(messages[1].content).toContain("After.");
+  });
+
+  it("builds a separate teacher-style speech prompt from the same word context", () => {
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    settings.speechExplanation.prompt = "SPEECH-ONLY-PROMPT";
+    const messages = buildSpeechExplanationMessages(settings, {
+      selectedText: "account for",
+      kind: "word",
+      context: {
+        currentSentence: "The policy may account for the decline."
+      },
+      pageUrl: "https://example.com",
+      pageTitle: "Example"
+    });
+
+    expect(messages[0].role).toBe("system");
+    expect(messages[0].content).toContain("SPEECH-ONLY-PROMPT");
+    expect(messages[0].content).toContain("Respond entirely in English");
+    expect(messages[1].content).toContain("The policy may account for the decline.");
+    expect(messages[1].content).toContain("account for");
+    expect(messages[0].content).not.toBe(DEFAULT_PROMPTS[0].systemPrompt);
+    expect(DEFAULT_SETTINGS.speechExplanation.prompt).toContain("Respond entirely in English");
   });
 
   it("expands only placeholders present in the original template", () => {

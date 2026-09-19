@@ -67,9 +67,16 @@ const testApi=byId<HTMLButtonElement>("testApi");
 const apiTestStatus=byId<HTMLSpanElement>("apiTestStatus");
 const testPronunciation=byId<HTMLButtonElement>("testPronunciation");
 const pronunciationTestStatus=byId<HTMLSpanElement>("pronunciationTestStatus");
+const autoSpeechExplanation=byId<HTMLInputElement>("autoSpeechExplanation");
+const speechExplanationDetails=byId<HTMLDivElement>("speechExplanationDetails");
+const stopSpeechOnCardClose=byId<HTMLInputElement>("stopSpeechOnCardClose");
+const speechPlaybackRate=byId<HTMLSelectElement>("speechPlaybackRate");
+const speechExplanationPrompt=byId<HTMLTextAreaElement>("speechExplanationPrompt");
+const speechTtsStyle=byId<HTMLTextAreaElement>("speechTtsStyle");
 
 let working:LookupSettings=structuredClone(DEFAULT_SETTINGS);
 let editingPromptId="";
+let activeProvider:ProviderId=DEFAULT_SETTINGS.api.provider;
 
 function selectedProvider():ProviderId{
   const value=provider.value as ProviderId;
@@ -95,13 +102,24 @@ function applyPopupTheme(value:UiTheme):void{
 
 function renderPronunciationSettings():void{
   const selected=pronunciationProvider.value as PronunciationProviderId;
-  mimoTtsSettings.classList.toggle("hidden",selected!=="mimo");
+  mimoTtsSettings.classList.toggle("hidden",selected!=="mimo"&&!autoSpeechExplanation.checked);
   youdaoSettings.classList.toggle("hidden",selected!=="youdao");
   pronunciationNote.textContent=selected==="mimo"
-    ?"默认使用 MiMo-V2.5-TTS。当前官方标注为限时免费；只有点击发音按钮时才会生成音频。"
+    ?(autoSpeechExplanation.checked
+      ?"MiMo TTS 同时用于手动单词发音和自动语音解释。"
+      :"默认使用 MiMo-V2.5-TTS；只有点击发音按钮时才会生成单词音频。")
     :selected==="youdao"
-      ?"使用有道智云词典的英式音标与英音，作为备用发音服务。"
-      :"发音按钮将隐藏，不会向第三方语音服务发送文本。";
+      ?(autoSpeechExplanation.checked
+        ?"单词发音使用有道；自动语音解释仍使用 MiMo TTS，因此 MiMo 配置会继续显示。"
+        :"使用有道智云词典的英式音标与英音，作为备用发音服务。")
+      :(autoSpeechExplanation.checked
+        ?"手动单词发音已关闭；自动语音解释仍使用 MiMo TTS。"
+        :"发音按钮将隐藏，不会向第三方语音服务发送文本。");
+}
+
+function renderSpeechExplanationSettings():void{
+  speechExplanationDetails.classList.toggle("hidden",!autoSpeechExplanation.checked);
+  renderPronunciationSettings();
 }
 
 function setTestStatus(element:HTMLSpanElement,state:"idle"|"testing"|"success"|"error",message:string):void{
@@ -221,7 +239,8 @@ async function loadForm():Promise<void>{
   working=loaded;
   autoLookup.checked=stored[AUTO_LOOKUP_STORAGE_KEY]!==false;
   provider.value=working.api.provider;
-  apiKey.value=working.api.apiKey;
+  activeProvider=working.api.provider;
+  apiKey.value=working.api.providerApiKeys?.[activeProvider]??working.api.apiKey;
   baseUrl.value=working.api.baseUrl;
   model.value=working.api.model;
   timeout.value=String(Math.round(working.api.timeoutMs/1000));
@@ -234,25 +253,37 @@ async function loadForm():Promise<void>{
   mimoTtsStyle.value=working.pronunciation.mimo.style;
   youdaoKey.value=working.pronunciation.youdao.appKey;
   youdaoSecret.value=working.pronunciation.youdao.appSecret;
+  autoSpeechExplanation.checked=working.speechExplanation.enabled;
+  stopSpeechOnCardClose.checked=working.speechExplanation.stopOnCardClose;
+  speechPlaybackRate.value=String(working.speechExplanation.playbackRate);
+  speechExplanationPrompt.value=working.speechExplanation.prompt;
+  speechTtsStyle.value=working.speechExplanation.ttsStyle;
   editingPromptId=working.prompts.items[0]?.id??"";
   const tabs=await chrome.tabs.query({active:true,currentWindow:true});
   if(tabs[0]?.url&&/\\.pdf(?:$|[?#])/i.test(tabs[0].url)){
     openPdf.textContent="用查词阅读器打开当前 PDF";
   }
-  renderPronunciationSettings();
+  renderSpeechExplanationSettings();
   renderProviderDetails();
   renderPromptEditor();
   applyPopupTheme(working.ui.theme);
 }
 
 provider.addEventListener("change",()=>{
-  const preset=PROVIDER_PRESETS[selectedProvider()];
+  working.api.providerApiKeys={
+    ...(working.api.providerApiKeys??{}),
+    [activeProvider]:apiKey.value.trim()
+  };
+  activeProvider=selectedProvider();
+  apiKey.value=working.api.providerApiKeys[activeProvider]??"";
+  const preset=PROVIDER_PRESETS[activeProvider];
   baseUrl.value=preset.baseUrl;
   model.value=preset.defaultModel;
   renderProviderDetails();
 });
 theme.addEventListener("change",()=>applyPopupTheme(theme.value as UiTheme));
 pronunciationProvider.addEventListener("change",renderPronunciationSettings);
+autoSpeechExplanation.addEventListener("change",renderSpeechExplanationSettings);
 
 testApi.addEventListener("click",()=>{
   void (async()=>{
@@ -392,10 +423,17 @@ save.addEventListener("click",()=>{
   void (async()=>{
     savePromptEditor();
     working.ui={theme:theme.value as UiTheme,fontSize:fontSize.value as UiFontSize};
+    const selectedApiProvider=selectedProvider();
+    const providerApiKeys={
+      ...(working.api.providerApiKeys??{}),
+      [selectedApiProvider]:apiKey.value.trim()
+    };
+    activeProvider=selectedApiProvider;
     working.api={
-      provider:selectedProvider(),
+      provider:selectedApiProvider,
       baseUrl:baseUrl.value.trim(),
-      apiKey:apiKey.value.trim(),
+      apiKey:providerApiKeys[selectedApiProvider]??"",
+      providerApiKeys,
       model:model.value.trim(),
       timeoutMs:currentTimeoutMs()
     };
@@ -413,6 +451,13 @@ save.addEventListener("click",()=>{
         appKey:youdaoKey.value.trim(),
         appSecret:youdaoSecret.value.trim()
       }
+    };
+    working.speechExplanation={
+      enabled:autoSpeechExplanation.checked,
+      stopOnCardClose:stopSpeechOnCardClose.checked,
+      playbackRate:Number(speechPlaybackRate.value)||DEFAULT_SETTINGS.speechExplanation.playbackRate,
+      prompt:speechExplanationPrompt.value.trim()||DEFAULT_SETTINGS.speechExplanation.prompt,
+      ttsStyle:speechTtsStyle.value.trim()||DEFAULT_SETTINGS.speechExplanation.ttsStyle
     };
     working.prompts.defaultWordPromptId=defaultWordPrompt.value||working.prompts.defaultWordPromptId;
     working.prompts.defaultSentencePromptId=defaultSentencePrompt.value||working.prompts.defaultSentencePromptId;

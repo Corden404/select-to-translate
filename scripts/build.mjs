@@ -38,6 +38,16 @@ await Promise.all([
     logLevel: "info"
   }),
   build({
+    entryPoints: ["src/offscreen/main.ts"],
+    outfile: "dist/offscreen.js",
+    bundle: true,
+    format: "esm",
+    platform: "browser",
+    target: browserTarget,
+    sourcemap: true,
+    logLevel: "info"
+  }),
+  build({
     entryPoints: ["src/history-page/main.ts"],
     outfile: "dist/history.js",
     bundle: true,
@@ -62,6 +72,7 @@ await Promise.all([
 await Promise.all([
   cp("public/manifest.json", "dist/manifest.json"),
   cp("public/popup.html", "dist/popup.html"),
+  cp("public/offscreen.html", "dist/offscreen.html"),
   cp("public/history.html", "dist/history.html"),
   cp("public/pdf.html", "dist/pdf.html"),
   cp("node_modules/pdfjs-dist/build/pdf.worker.mjs", "dist/pdf.worker.mjs")

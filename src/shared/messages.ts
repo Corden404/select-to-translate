@@ -56,6 +56,9 @@ function looksLikePublicSettings(value: unknown): value is PublicLookupSettings 
     && !!settings.pronunciation.mimo
     && !("apiKey" in (settings.pronunciation.mimo as unknown as Record<string, unknown>))
     && typeof settings.pronunciation.mimo.voice === "string"
+    && !!settings.speechExplanation
+    && typeof settings.speechExplanation.enabled === "boolean"
+    && typeof settings.speechExplanation.stopOnCardClose === "boolean"
     && !!settings.prompts
     && Array.isArray(settings.prompts.items)
     && settings.prompts.items.every(item => {
@@ -100,6 +103,7 @@ export type LookupPortResponse =
   | { type: "LOOKUP_STARTED"; requestId: string; recordId: string; promptId: string; promptName: string }
   | { type: "LOOKUP_CHUNK"; requestId: string; text: string }
   | { type: "LOOKUP_DONE"; requestId: string }
+  | { type: "SPEECH_READY"; requestId: string }
   | { type: "CHAT_STARTED"; requestId: string }
   | { type: "CHAT_CHUNK"; requestId: string; text: string }
   | { type: "CHAT_DONE"; requestId: string }
@@ -108,6 +112,8 @@ export type LookupPortResponse =
 
 export type OneShotMessage =
   | { type: "PUBLIC_SETTINGS_GET" }
+  | { type: "SPEECH_CANCEL"; requestId: string }
+  | { type: "SPEECH_REPLAY"; requestId: string }
   | { type: "PRONUNCIATION_GET"; word: string }
   | {
       type: "TEST_LLM_CONNECTION";
@@ -133,6 +139,11 @@ export type OneShotMessage =
         appSecret: string;
       };
     };
+
+export interface SpeechActionResponse {
+  ok: boolean;
+  message?: string;
+}
 
 export interface PronunciationResponse {
   ok: boolean;

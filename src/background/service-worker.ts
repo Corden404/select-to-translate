@@ -1,21 +1,27 @@
 import { putHistoryRecord } from "../history/db";
 import type { LookupHistoryRecord } from "../history/types";
 import { streamOpenAiCompatible, testOpenAiCompatibleConnection } from "../llm/openai-compatible";
-import { getMiMoPronunciation } from "../pronunciation/mimo";
+import { getMiMoExplanationSpeech, getMiMoPronunciation } from "../pronunciation/mimo";
 import { getYoudaoPronunciation } from "../pronunciation/youdao";
 import type {
   ConnectionTestResponse,
   LookupPortRequest,
   LookupPortResponse,
+  LookupRequestPayload,
   OneShotMessage,
   PronunciationResponse,
-  PublicSettingsResponse
+  PublicSettingsResponse,
+  SpeechActionResponse
 } from "../shared/messages";
 import {
   isLookupPortRequest,
   recoverLookupRequestId
 } from "../shared/messages";
-import { buildLookupMessages, type ChatMessage } from "../shared/prompts";
+import {
+  buildLookupMessages,
+  buildSpeechExplanationMessages,
+  type ChatMessage
+} from "../shared/prompts";
 import {
   AUTO_LOOKUP_STORAGE_KEY,
   DEFAULT_SETTINGS,
@@ -23,6 +29,157 @@ import {
   loadLookupSettings,
   toPublicLookupSettings
 } from "../shared/settings";
+
+interface SpeechSession {
+  requestId: string;
+  scriptController: AbortController;
+  ttsController: AbortController | null;
+}
+
+interface ReplayableSpeech {
+  requestId: string;
+  audioDataUrl: string;
+  playbackRate: number;
+}
+
+let activeSpeechSession: SpeechSession | null = null;
+let offscreenCreation: Promise<void> | null = null;
+let latestSpeechLookupRequestId = "";
+let replayableSpeech: ReplayableSpeech | null = null;
+const cancelledSpeechRequestIds = new Set<string>();
+
+async function ensureOffscreenDocument(): Promise<void> {
+  if (offscreenCreation) {
+    await offscreenCreation;
+    return;
+  }
+  if (await chrome.offscreen.hasDocument()) return;
+
+  offscreenCreation = chrome.offscreen.createDocument({
+    url: "offscreen.html",
+    reasons: [chrome.offscreen.Reason.AUDIO_PLAYBACK],
+    justification: "Play automatic vocabulary explanation audio."
+  }).finally(() => {
+    offscreenCreation = null;
+  });
+  await offscreenCreation;
+}
+
+async function stopOffscreenAudio(requestId?: string): Promise<void> {
+  if (!(await chrome.offscreen.hasDocument())) return;
+  try {
+    await chrome.runtime.sendMessage({
+      target: "offscreen-audio",
+      type: "STOP_AUDIO",
+      requestId
+    });
+  } catch {
+    // The offscreen document may close between the presence check and the message.
+  }
+}
+
+async function cancelSpeechSession(requestId?: string): Promise<void> {
+  const current = activeSpeechSession;
+  if (requestId && current && current.requestId !== requestId) return;
+
+  if (current) {
+    activeSpeechSession = null;
+    current.scriptController.abort();
+    current.ttsController?.abort();
+  }
+  if (!requestId || replayableSpeech?.requestId === requestId) replayableSpeech = null;
+  await stopOffscreenAudio(requestId);
+}
+
+function cleanSpeechScript(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/^[\s>*#-]+/gm, "")
+    .replace(/[*_`]/g, "")
+    .replace(/\n{2,}/g, "\n")
+    .trim()
+    .slice(0, 1200);
+}
+
+async function startSpeechExplanation(
+  requestId: string,
+  payload: LookupRequestPayload,
+  settings: Awaited<ReturnType<typeof loadLookupSettings>>,
+  onReady?: () => void
+): Promise<void> {
+  const previous = activeSpeechSession;
+  if (requestId !== latestSpeechLookupRequestId || cancelledSpeechRequestIds.has(requestId)) return;
+  previous?.scriptController.abort();
+  previous?.ttsController?.abort();
+
+  const session: SpeechSession = {
+    requestId,
+    scriptController: new AbortController(),
+    ttsController: null
+  };
+  activeSpeechSession = session;
+
+  await stopOffscreenAudio();
+  if (activeSpeechSession !== session || session.scriptController.signal.aborted) return;
+
+  let script = "";
+  try {
+    await streamOpenAiCompatible(
+      {
+        baseUrl: settings.api.baseUrl,
+        apiKey: settings.api.apiKey,
+        model: settings.api.model,
+        timeoutMs: settings.api.timeoutMs,
+        messages: buildSpeechExplanationMessages(settings, payload)
+      },
+      session.scriptController.signal,
+      text => {
+        if (activeSpeechSession === session && !session.scriptController.signal.aborted) {
+          script += text;
+        }
+      }
+    );
+
+    if (activeSpeechSession !== session || session.scriptController.signal.aborted) return;
+    const speechText = cleanSpeechScript(script);
+    if (!speechText) throw new Error("语音讲解模型没有返回可朗读的内容。");
+
+    const ttsController = new AbortController();
+    session.ttsController = ttsController;
+    const mimoApiKey = settings.pronunciation.mimo.apiKey
+      || (settings.api.provider === "mimo" ? settings.api.apiKey : "");
+    const result = await getMiMoExplanationSpeech(speechText, {
+      ...settings.pronunciation.mimo,
+      apiKey: mimoApiKey,
+      style: settings.speechExplanation.ttsStyle
+    }, ttsController.signal);
+
+    if (activeSpeechSession !== session || ttsController.signal.aborted || !result.audioDataUrl) return;
+    replayableSpeech = {
+      requestId,
+      audioDataUrl: result.audioDataUrl,
+      playbackRate: settings.speechExplanation.playbackRate
+    };
+    onReady?.();
+    await ensureOffscreenDocument();
+    if (activeSpeechSession !== session || ttsController.signal.aborted) return;
+    await chrome.runtime.sendMessage({
+      target: "offscreen-audio",
+      type: "PLAY_AUDIO",
+      requestId,
+      audioDataUrl: result.audioDataUrl,
+      playbackRate: settings.speechExplanation.playbackRate,
+    });
+  } catch (error) {
+    if (activeSpeechSession !== session
+      || session.scriptController.signal.aborted
+      || session.ttsController?.signal.aborted) {
+      return;
+    }
+    activeSpeechSession = null;
+    console.warn("自动语音解释失败：", error);
+  }
+}
 
 async function restrictLocalStorageAccess(): Promise<void> {
   await chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
@@ -120,6 +277,13 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
   if (changes[AUTO_LOOKUP_STORAGE_KEY] || changes[SETTINGS_STORAGE_KEY]) {
     void broadcastPublicState();
+  }
+  if (changes[AUTO_LOOKUP_STORAGE_KEY]?.newValue === false) {
+    void cancelSpeechSession();
+  } else if (changes[SETTINGS_STORAGE_KEY]) {
+    void loadLookupSettings().then(settings => {
+      if (!settings.speechExplanation.enabled) return cancelSpeechSession();
+    }).catch(() => undefined);
   }
 });
 
@@ -279,6 +443,13 @@ chrome.runtime.onConnect.addListener(port => {
       return;
     }
 
+    const speechStop = message.type === "LOOKUP_START"
+      ? (() => {
+          latestSpeechLookupRequestId = message.requestId;
+          return cancelSpeechSession();
+        })()
+      : Promise.resolve();
+
     if (message.type === "CHAT_SEND") {
       if (streamInProgress || chatDispatchInProgress) {
         safePost({
@@ -294,7 +465,21 @@ chrome.runtime.onConnect.addListener(port => {
     void (async () => {
       if (message.type === "LOOKUP_START") {
         abortStreaming();
-        const settings = await loadLookupSettings();
+        const [settings] = await Promise.all([
+          loadLookupSettings(),
+          speechStop
+        ]);
+        if (message.requestId === latestSpeechLookupRequestId
+          && !cancelledSpeechRequestIds.has(message.requestId)
+          && settings.speechExplanation.enabled
+          && message.payload.kind === "word") {
+          void startSpeechExplanation(
+            message.requestId,
+            message.payload,
+            settings,
+            () => safePost({ type: "SPEECH_READY", requestId: message.requestId })
+          );
+        }
         const built = buildLookupMessages(settings, message.payload, message.promptId);
         activeRequestId = message.requestId;
         conversation = [...built.messages];
@@ -358,7 +543,7 @@ chrome.runtime.onConnect.addListener(port => {
 chrome.runtime.onMessage.addListener((
   message: OneShotMessage,
   sender,
-  sendResponse: (response: PronunciationResponse | ConnectionTestResponse | PublicSettingsResponse) => void
+  sendResponse: (response: PronunciationResponse | ConnectionTestResponse | PublicSettingsResponse | SpeechActionResponse) => void
 ) => {
   if (!message || typeof message !== "object" || typeof message.type !== "string") {
     return false;
@@ -388,6 +573,57 @@ chrome.runtime.onMessage.addListener((
           message: error instanceof Error ? error.message : "无法读取公开设置。"
         });
       }
+      return;
+    }
+
+    if (message.type === "SPEECH_REPLAY") {
+      if (typeof message.requestId !== "string" || !message.requestId || message.requestId.length > 100) {
+        sendResponse({ ok: false, message: "语音解释请求无效。" });
+        return;
+      }
+
+      try {
+        if (replayableSpeech?.requestId === message.requestId) {
+          await ensureOffscreenDocument();
+          await chrome.runtime.sendMessage({
+            target: "offscreen-audio",
+            type: "PLAY_AUDIO",
+            requestId: message.requestId,
+            audioDataUrl: replayableSpeech.audioDataUrl,
+            playbackRate: replayableSpeech.playbackRate,
+          });
+          sendResponse({ ok: true });
+          return;
+        }
+
+        if (await chrome.offscreen.hasDocument()) {
+          const result = await chrome.runtime.sendMessage({
+            target: "offscreen-audio",
+            type: "REPLAY_AUDIO",
+            requestId: message.requestId
+          }) as SpeechActionResponse | undefined;
+          sendResponse(result?.ok ? result : { ok: false, message: "当前语音解释已不可重听。" });
+          return;
+        }
+
+        sendResponse({ ok: false, message: "当前语音解释已不可重听。" });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          message: error instanceof Error ? error.message : "重听语音解释失败。"
+        });
+      }
+      return;
+    }
+
+    if (message.type === "SPEECH_CANCEL") {
+      if (typeof message.requestId === "string" && message.requestId.length <= 100) {
+        cancelledSpeechRequestIds.add(message.requestId);
+        setTimeout(() => cancelledSpeechRequestIds.delete(message.requestId), 30000);
+        if (latestSpeechLookupRequestId === message.requestId) latestSpeechLookupRequestId = "";
+        await cancelSpeechSession(message.requestId);
+      }
+      sendResponse({ ok: true });
       return;
     }
 

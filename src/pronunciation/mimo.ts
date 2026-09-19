@@ -66,14 +66,16 @@ function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): {
   };
 }
 
-export async function getMiMoPronunciation(
+async function synthesizeMiMoSpeech(
   text: string,
   config: MimoTtsSettings,
+  maxLength: number,
+  label: string,
   signal?: AbortSignal
 ): Promise<PronunciationResult> {
   const input = text.trim();
-  if (!input || input.length > 160) {
-    throw new Error("当前选区不适合使用 MiMo TTS 发音。");
+  if (!input || input.length > maxLength) {
+    throw new Error("当前文本不适合使用 MiMo TTS 合成。");
   }
   if (!config.apiKey) {
     throw new Error("请先在扩展设置中填写 MiMo TTS API Key，或把主模型平台设置为小米 MiMo 以复用其 Key。");
@@ -134,11 +136,39 @@ export async function getMiMoPronunciation(
 
     return {
       audioDataUrl: `data:audio/wav;base64,${audioBase64}`,
-      label: `MiMo TTS · ${config.voice} · 英式风格`
+      label
     };
   } finally {
     timeout.cleanup();
   }
+}
+
+export function getMiMoPronunciation(
+  text: string,
+  config: MimoTtsSettings,
+  signal?: AbortSignal
+): Promise<PronunciationResult> {
+  return synthesizeMiMoSpeech(
+    text,
+    config,
+    160,
+    `MiMo TTS · ${config.voice} · 英式风格`,
+    signal
+  );
+}
+
+export function getMiMoExplanationSpeech(
+  text: string,
+  config: MimoTtsSettings,
+  signal?: AbortSignal
+): Promise<PronunciationResult> {
+  return synthesizeMiMoSpeech(
+    text,
+    config,
+    1200,
+    `MiMo TTS · ${config.voice} · 自然讲解`,
+    signal
+  );
 }
 
 export class MiMoPronunciationProvider implements PronunciationProvider {

@@ -4,7 +4,8 @@ import { FloatingCard, type CardQuery } from "./floating-card";
 import type {
   LookupPortResponse,
   LookupRequestPayload,
-  PronunciationResponse
+  PronunciationResponse,
+  SpeechActionResponse
 } from "../shared/messages";
 import {
   clampLookupPayload,
@@ -25,6 +26,7 @@ let lastFingerprint = "";
 let suppressLookupUntil = 0;
 let activePort: chrome.runtime.Port | null = null;
 let activeRequestId = "";
+let lastLookupRequestId = "";
 let settings: PublicLookupSettings = DEFAULT_PUBLIC_SETTINGS;
 
 const pronunciationCache = new Map<string, PronunciationResponse>();
@@ -35,9 +37,18 @@ const card = new FloatingCard({
   onKindChange: (query, promptId) => startLookup(query, promptId),
   onFollowUp: message => sendFollowUp(message),
   onPronounce: word => getPronunciation(word),
+  onReplaySpeech: () => replaySpeechExplanation(),
   onDismiss: () => {
     lastFingerprint = "";
     suppressLookupUntil = performance.now() + 180;
+    const requestId = lastLookupRequestId;
+    if (requestId && settings.speechExplanation.enabled && settings.speechExplanation.stopOnCardClose) {
+      void chrome.runtime.sendMessage({
+        type: "SPEECH_CANCEL",
+        requestId
+      }).catch(() => undefined);
+    }
+    lastLookupRequestId = "";
     cancelActiveRequest();
   }
 });
@@ -127,6 +138,7 @@ function startLookup(query: CardQuery, promptId?: string): void {
 
   const requestId = crypto.randomUUID();
   activeRequestId = requestId;
+  lastLookupRequestId = requestId;
   const port = chrome.runtime.connect({ name: "lookup-stream" });
   activePort = port;
   card.beginLoading();
@@ -153,6 +165,9 @@ function startLookup(query: CardQuery, promptId?: string): void {
         break;
       case "LOOKUP_DONE":
         card.complete();
+        break;
+      case "SPEECH_READY":
+        card.setSpeechReplayReady(true);
         break;
       case "CHAT_STARTED":
         card.chatStarted();
@@ -211,6 +226,17 @@ async function getPronunciation(word: string): Promise<PronunciationResponse> {
 
   if (response?.ok) pronunciationCache.set(key, response);
   return response ?? { ok: false, message: "发音服务没有响应。" };
+}
+
+async function replaySpeechExplanation(): Promise<SpeechActionResponse> {
+  const requestId = lastLookupRequestId;
+  if (!requestId) return { ok: false, message: "当前没有可重听的语音解释。" };
+
+  const response = await chrome.runtime.sendMessage({
+    type: "SPEECH_REPLAY",
+    requestId
+  }) as SpeechActionResponse;
+  return response ?? { ok: false, message: "语音解释重听服务没有响应。" };
 }
 
 document.addEventListener("pointerdown", event => {

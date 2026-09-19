@@ -1,4 +1,4 @@
-import type { PronunciationResponse } from "../shared/messages";
+import type { PronunciationResponse, SpeechActionResponse } from "../shared/messages";
 import {
   publicPromptsForKind,
   type PublicLookupSettings,
@@ -23,6 +23,7 @@ interface FloatingCardCallbacks {
   onKindChange?: (query: CardQuery, promptId: string) => void;
   onFollowUp?: (message: string) => boolean;
   onPronounce?: (word: string) => Promise<PronunciationResponse>;
+  onReplaySpeech?: () => Promise<SpeechActionResponse>;
   onDismiss?: () => void;
 }
 
@@ -38,6 +39,7 @@ export class FloatingCard {
   private pronunciationRow: HTMLDivElement;
   private pronunciationText: HTMLSpanElement;
   private pronunciationButton: HTMLButtonElement;
+  private speechReplayButton: HTMLButtonElement;
   private followUpButton: HTMLButtonElement;
   private chatPanel: HTMLDivElement;
   private chatMessages: HTMLDivElement;
@@ -104,6 +106,7 @@ export class FloatingCard {
         .body.error { color:#ff8e8e; }
         .context { margin-top:11px; padding-top:9px; border-top:1px solid var(--border); color:var(--muted); font-size:.78em; white-space:pre-wrap; overflow-wrap:anywhere; }
         .toolbar { display:flex; align-items:center; gap:7px; margin-top:11px; flex-wrap:wrap; }
+        .speech-replay { display:none; } .speech-replay.visible { display:inline-block; }
         .prompt { min-width:140px; max-width:210px; padding:5px 7px; border:1px solid var(--border); border-radius:8px; background:var(--bg-soft); color:var(--text); }
         .chat { display:none; margin-top:12px; padding-top:10px; border-top:1px solid var(--border); }
         .chat.visible { display:block; }
@@ -132,6 +135,7 @@ export class FloatingCard {
           <select class="prompt" aria-label="Prompt"></select>
           <button class="regenerate" type="button">重新生成</button>
           <button class="follow-up" type="button" disabled>继续追问</button>
+          <button class="speech-replay" type="button" disabled>🔁 重听讲解</button>
         </div>
         <div class="chat">
           <div class="messages"></div>
@@ -152,6 +156,7 @@ export class FloatingCard {
     this.pronunciationRow = this.shadow.querySelector(".pronunciation") as HTMLDivElement;
     this.pronunciationText = this.shadow.querySelector(".phonetic") as HTMLSpanElement;
     this.pronunciationButton = this.shadow.querySelector(".speak") as HTMLButtonElement;
+    this.speechReplayButton = this.shadow.querySelector(".speech-replay") as HTMLButtonElement;
     this.followUpButton = this.shadow.querySelector(".follow-up") as HTMLButtonElement;
     this.chatPanel = this.shadow.querySelector(".chat") as HTMLDivElement;
     this.chatMessages = this.shadow.querySelector(".messages") as HTMLDivElement;
@@ -181,6 +186,7 @@ export class FloatingCard {
       }
     });
     this.pronunciationButton.addEventListener("click", () => void this.playPronunciation());
+    this.speechReplayButton.addEventListener("click", () => void this.replaySpeechExplanation());
 
     this.darkMedia.addEventListener("change", () => {
       if (this.themePreference === "system") this.applyResolvedTheme();
@@ -235,6 +241,9 @@ export class FloatingCard {
     this.status.textContent = "准备查询";
     this.followUpButton.disabled = true;
     this.initialResponseText = "";
+    const speechReplayVisible = query.selection.kind === "word" && settings.speechExplanation.enabled;
+    this.speechReplayButton.classList.toggle("visible", speechReplayVisible);
+    this.speechReplayButton.disabled = true;
     const pronunciationVisible = query.selection.kind === "word"
       && settings.pronunciation.provider !== "off";
     this.pronunciationRow.classList.toggle("visible", pronunciationVisible);
@@ -257,6 +266,7 @@ export class FloatingCard {
     this.initialResponseText = "";
     this.followUpButton.disabled = true;
     this.status.textContent = "正在连接模型…";
+    this.speechReplayButton.disabled = true;
     this.position();
   }
 
@@ -322,6 +332,31 @@ export class FloatingCard {
   setActivePrompt(promptId: string): void {
     if ([...this.promptSelect.options].some(option => option.value === promptId)) {
       this.promptSelect.value = promptId;
+    }
+  }
+
+  setSpeechReplayReady(ready: boolean): void {
+    if (!this.speechReplayButton.classList.contains("visible")) return;
+    this.speechReplayButton.disabled = !ready;
+  }
+
+  private async replaySpeechExplanation(): Promise<void> {
+    if (!this.callbacks.onReplaySpeech || this.speechReplayButton.disabled) return;
+    this.speechReplayButton.disabled = true;
+    let canReplayAgain = false;
+    try {
+      const result = await this.callbacks.onReplaySpeech();
+      if (!result.ok) {
+        this.status.textContent = result.message ?? "当前语音解释已不可重听";
+        return;
+      }
+      canReplayAgain = true;
+    } catch (error) {
+      this.status.textContent = error instanceof Error ? error.message : "重听语音解释失败";
+    } finally {
+      if (canReplayAgain && this.speechReplayButton.classList.contains("visible")) {
+        this.speechReplayButton.disabled = false;
+      }
     }
   }
 

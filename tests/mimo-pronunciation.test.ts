@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getMiMoPronunciation } from "../src/pronunciation/mimo";
+import { getMiMoExplanationSpeech, getMiMoPronunciation } from "../src/pronunciation/mimo";
 
 describe("MiMo TTS pronunciation provider", () => {
   it("calls MiMo chat completions with assistant-role text and returns WAV audio", async () => {
@@ -46,6 +46,38 @@ describe("MiMo TTS pronunciation provider", () => {
 
       const headers = new Headers(requestHeaders);
       expect(headers.get("api-key")).toBe("mimo-key");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("allows a longer teacher explanation and uses its own TTS style", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestBody = "";
+    globalThis.fetch = async (_input, init) => {
+      requestBody = String(init?.body ?? "");
+      return new Response(JSON.stringify({
+        choices: [{ message: { audio: { data: "UklGRkZBS0VXQVY=" } } }]
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    try {
+      const explanation = "Here, account for means to explain the reason for the decline. ".repeat(4);
+      expect(explanation.length).toBeGreaterThan(160);
+      const result = await getMiMoExplanationSpeech(explanation, {
+        apiKey: "mimo-key",
+        baseUrl: "https://api.xiaomimimo.com/v1",
+        model: "mimo-v2.5-tts",
+        voice: "Mia",
+        style: "Speak like a natural teacher."
+      });
+
+      const body = JSON.parse(requestBody);
+      expect(body.messages).toEqual([
+        { role: "user", content: "Speak like a natural teacher." },
+        { role: "assistant", content: explanation.trim() }
+      ]);
+      expect(result.label).toContain("自然讲解");
     } finally {
       globalThis.fetch = originalFetch;
     }
