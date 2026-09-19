@@ -39,7 +39,31 @@ export type LookupPortResponse =
   | { type: "LOOKUP_ERROR"; requestId: string; message: string };
 
 export type OneShotMessage =
-  | { type: "PRONUNCIATION_GET"; word: string };
+  | { type: "PRONUNCIATION_GET"; word: string }
+  | {
+      type: "TEST_LLM_CONNECTION";
+      config: {
+        baseUrl: string;
+        apiKey: string;
+        model: string;
+        timeoutMs: number;
+      };
+    }
+  | {
+      type: "TEST_PRONUNCIATION_CONNECTION";
+      provider: "mimo" | "youdao";
+      mimo?: {
+        apiKey: string;
+        baseUrl: string;
+        model: string;
+        voice: "Mia" | "Chloe" | "Milo" | "Dean";
+        style: string;
+      };
+      youdao?: {
+        appKey: string;
+        appSecret: string;
+      };
+    };
 
 export interface PronunciationResponse {
   ok: boolean;
@@ -48,4 +72,12 @@ export interface PronunciationResponse {
   audioDataUrl?: string;
   label?: string;
   message?: string;
+}
+
+export interface ConnectionTestResponse {
+  ok: boolean;
+  latencyMs: number;
+  message: string;
+  preview?: string;
+  provider?: "llm" | "mimo" | "youdao";
 }

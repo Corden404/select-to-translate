@@ -8,6 +8,11 @@ export interface OpenAiCompatibleRequest {
   timeoutMs?: number;
 }
 
+export interface LlmConnectionTestResult {
+  latencyMs: number;
+  preview: string;
+}
+
 export class LlmRequestError extends Error {
   constructor(
     message: string,
@@ -204,4 +209,33 @@ export async function streamOpenAiCompatible(
   } finally {
     timeout.cleanup();
   }
+}
+
+export async function testOpenAiCompatibleConnection(
+  config: Omit<OpenAiCompatibleRequest, "messages">,
+  signal: AbortSignal = new AbortController().signal
+): Promise<LlmConnectionTestResult> {
+  const startedAt = performance.now();
+  let preview = "";
+
+  await streamOpenAiCompatible(
+    {
+      ...config,
+      messages: [
+        {
+          role: "user",
+          content: "This is a connection test. Reply with OK only."
+        }
+      ]
+    },
+    signal,
+    text => {
+      if (preview.length < 160) preview += text;
+    }
+  );
+
+  return {
+    latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+    preview: preview.trim().slice(0, 160)
+  };
 }

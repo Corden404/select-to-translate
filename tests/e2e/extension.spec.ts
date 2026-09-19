@@ -53,19 +53,43 @@ test("extension lookup, streaming chat, history, settings, and PDF work end to e
       const chunks: Buffer[] = [];
       req.on("data", chunk => chunks.push(Buffer.from(chunk)));
       req.on("end", () => {
-        let followUp = false;
+        let body: {
+          model?: string;
+          messages?: Array<{ role?: string; content?: string }>;
+        } = {};
+
         try {
-          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
-            messages?: Array<{ role?: string; content?: string }>;
-          };
-          followUp = Boolean(body.messages?.some(message =>
-            message.role === "user" && message.content?.includes("为什么")
-          ));
+          body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         } catch {
-          // The extension should always send valid JSON, but a malformed request gets a generic response.
+          // The extension should always send valid JSON.
         }
 
-        const parts = followUp ? ["追问", "回答"] : ["初始", "解释"];
+        if (body.model === "mimo-v2.5-tts") {
+          res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({
+            choices: [{
+              message: {
+                audio: {
+                  data: "UklGRkZBS0VXQVY="
+                }
+              }
+            }]
+          }));
+          return;
+        }
+
+        const followUp = Boolean(body.messages?.some(message =>
+          message.role === "user" && message.content?.includes("为什么")
+        ));
+        const connectionTest = Boolean(body.messages?.some(message =>
+          message.content?.includes("connection test")
+        ));
+        const parts = connectionTest
+          ? ["OK"]
+          : followUp
+            ? ["追问", "回答"]
+            : ["初始", "解释"];
+
         res.writeHead(200, {
           "content-type": "text/event-stream; charset=utf-8",
           "cache-control": "no-cache"
@@ -117,6 +141,14 @@ test("extension lookup, streaming chat, history, settings, and PDF work end to e
     await popup.locator("#apiKey").fill("test-key");
     await popup.locator("#baseUrl").fill(origin);
     await popup.locator("#model").fill("mock-model");
+    await popup.locator("#testApi").click();
+    await expect(popup.locator("#apiTestStatus")).toContainText("连接成功");
+    await expect(popup.locator("#apiTestStatus")).toContainText("OK");
+
+    await popup.locator("#mimoTtsKey").fill("test-key");
+    await popup.locator("#mimoTtsBaseUrl").fill(origin);
+    await popup.locator("#testPronunciation").click();
+    await expect(popup.locator("#pronunciationTestStatus")).toContainText("连接成功");
     await popup.locator("#save").click();
     await expect(popup.locator("#status")).toHaveText("已保存。");
 

@@ -1,3 +1,4 @@
+import type { ConnectionTestResponse } from "../shared/messages";
 import {
   AUTO_LOOKUP_STORAGE_KEY,
   DEFAULT_PROMPTS,
@@ -62,6 +63,10 @@ const save=byId<HTMLButtonElement>("save");
 const status=byId<HTMLSpanElement>("status");
 const openHistory=byId<HTMLButtonElement>("openHistory");
 const openPdf=byId<HTMLButtonElement>("openPdf");
+const testApi=byId<HTMLButtonElement>("testApi");
+const apiTestStatus=byId<HTMLSpanElement>("apiTestStatus");
+const testPronunciation=byId<HTMLButtonElement>("testPronunciation");
+const pronunciationTestStatus=byId<HTMLSpanElement>("pronunciationTestStatus");
 
 let working:LookupSettings=structuredClone(DEFAULT_SETTINGS);
 let editingPromptId="";
@@ -97,6 +102,21 @@ function renderPronunciationSettings():void{
     :selected==="youdao"
       ?"使用有道智云词典的英式音标与英音，作为备用发音服务。"
       :"发音按钮将隐藏，不会向第三方语音服务发送文本。";
+}
+
+function setTestStatus(element:HTMLSpanElement,state:"idle"|"testing"|"success"|"error",message:string):void{
+  element.className="test-status"+(state==="idle"?"":" "+state);
+  element.textContent=message;
+}
+
+function formatTestResult(response:ConnectionTestResponse):string{
+  const timing=response.latencyMs>=0?`${response.latencyMs} ms`:"";
+  const preview=response.preview?.trim();
+  return [response.message,timing,preview].filter(Boolean).join(" · ");
+}
+
+function currentTimeoutMs():number{
+  return Math.min(120000,Math.max(5000,Number(timeout.value||45)*1000));
 }
 
 function currentPrompt():PromptDefinition|undefined{
@@ -233,6 +253,61 @@ provider.addEventListener("change",()=>{
 });
 theme.addEventListener("change",()=>applyPopupTheme(theme.value as UiTheme));
 pronunciationProvider.addEventListener("change",renderPronunciationSettings);
+
+testApi.addEventListener("click",()=>{
+  void (async()=>{
+    testApi.disabled=true;
+    setTestStatus(apiTestStatus,"testing","正在测试模型 API…");
+    const response=await chrome.runtime.sendMessage({
+      type:"TEST_LLM_CONNECTION",
+      config:{
+        baseUrl:baseUrl.value.trim(),
+        apiKey:apiKey.value.trim(),
+        model:model.value.trim(),
+        timeoutMs:currentTimeoutMs()
+      }
+    }) as ConnectionTestResponse;
+    setTestStatus(apiTestStatus,response.ok?"success":"error",formatTestResult(response));
+  })().catch(error=>{
+    setTestStatus(apiTestStatus,"error",error instanceof Error?error.message:"模型 API 测试失败。");
+  }).finally(()=>{testApi.disabled=false;});
+});
+
+testPronunciation.addEventListener("click",()=>{
+  void (async()=>{
+    const selected=pronunciationProvider.value as PronunciationProviderId;
+    if(selected==="off"){
+      setTestStatus(pronunciationTestStatus,"error","发音功能当前已关闭。");
+      return;
+    }
+
+    testPronunciation.disabled=true;
+    setTestStatus(pronunciationTestStatus,"testing",selected==="mimo"?"正在测试 MiMo TTS…":"正在测试有道词典…");
+
+    const response=await chrome.runtime.sendMessage(selected==="mimo"?{
+      type:"TEST_PRONUNCIATION_CONNECTION",
+      provider:"mimo",
+      mimo:{
+        apiKey:mimoTtsKey.value.trim()||(selectedProvider()==="mimo"?apiKey.value.trim():""),
+        baseUrl:mimoTtsBaseUrl.value.trim()||DEFAULT_SETTINGS.pronunciation.mimo.baseUrl,
+        model:"mimo-v2.5-tts",
+        voice:mimoVoice.value as MimoVoiceId,
+        style:mimoTtsStyle.value.trim()||DEFAULT_SETTINGS.pronunciation.mimo.style
+      }
+    }:{
+      type:"TEST_PRONUNCIATION_CONNECTION",
+      provider:"youdao",
+      youdao:{
+        appKey:youdaoKey.value.trim(),
+        appSecret:youdaoSecret.value.trim()
+      }
+    }) as ConnectionTestResponse;
+
+    setTestStatus(pronunciationTestStatus,response.ok?"success":"error",formatTestResult(response));
+  })().catch(error=>{
+    setTestStatus(pronunciationTestStatus,"error",error instanceof Error?error.message:"发音 API 测试失败。");
+  }).finally(()=>{testPronunciation.disabled=false;});
+});
 toggleKey.addEventListener("click",()=>{
   const show=apiKey.type==="password";
   apiKey.type=show?"text":"password";
@@ -322,7 +397,7 @@ save.addEventListener("click",()=>{
       baseUrl:baseUrl.value.trim(),
       apiKey:apiKey.value.trim(),
       model:model.value.trim(),
-      timeoutMs:Math.min(120000,Math.max(5000,Number(timeout.value||45)*1000))
+      timeoutMs:currentTimeoutMs()
     };
     working.pronunciation={
       provider:pronunciationProvider.value as PronunciationProviderId,

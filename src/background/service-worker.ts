@@ -1,9 +1,10 @@
 import { putHistoryRecord } from "../history/db";
 import type { LookupHistoryRecord } from "../history/types";
-import { streamOpenAiCompatible } from "../llm/openai-compatible";
+import { streamOpenAiCompatible, testOpenAiCompatibleConnection } from "../llm/openai-compatible";
 import { getMiMoPronunciation } from "../pronunciation/mimo";
 import { getYoudaoPronunciation } from "../pronunciation/youdao";
 import type {
+  ConnectionTestResponse,
   LookupPortRequest,
   LookupPortResponse,
   OneShotMessage,
@@ -303,14 +304,114 @@ chrome.runtime.onConnect.addListener(port => {
 
 chrome.runtime.onMessage.addListener((
   message: OneShotMessage,
-  _sender,
-  sendResponse: (response: PronunciationResponse) => void
+  sender,
+  sendResponse: (response: PronunciationResponse | ConnectionTestResponse) => void
 ) => {
-  if (!message || message.type !== "PRONUNCIATION_GET" || typeof message.word !== "string") {
+  if (!message || typeof message !== "object" || typeof message.type !== "string") {
+    return false;
+  }
+
+  const isConnectionTest = message.type === "TEST_LLM_CONNECTION"
+    || message.type === "TEST_PRONUNCIATION_CONNECTION";
+  const extensionSource = typeof sender.url === "string"
+    ? sender.url
+    : typeof sender.origin === "string"
+      ? sender.origin
+      : "";
+  const isTrustedExtensionPage = extensionSource.startsWith("chrome-extension://");
+
+  if (isConnectionTest && !isTrustedExtensionPage) {
     return false;
   }
 
   void (async () => {
+    if (message.type === "TEST_LLM_CONNECTION") {
+      const startedAt = performance.now();
+      try {
+        const config = message.config;
+        if (!config
+          || typeof config.baseUrl !== "string"
+          || typeof config.apiKey !== "string"
+          || typeof config.model !== "string"
+          || !Number.isFinite(config.timeoutMs)
+        ) {
+          throw new Error("测试配置不完整。");
+        }
+
+        const result = await testOpenAiCompatibleConnection({
+          baseUrl: config.baseUrl.slice(0, 5000),
+          apiKey: config.apiKey.slice(0, 1000),
+          model: config.model.slice(0, 300),
+          timeoutMs: Math.min(120000, Math.max(5000, config.timeoutMs))
+        });
+
+        sendResponse({
+          ok: true,
+          provider: "llm",
+          latencyMs: result.latencyMs,
+          preview: result.preview,
+          message: "模型 API 连接成功。"
+        });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          provider: "llm",
+          latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+          message: error instanceof Error ? error.message : "模型 API 测试失败。"
+        });
+      }
+      return;
+    }
+
+    if (message.type === "TEST_PRONUNCIATION_CONNECTION") {
+      const startedAt = performance.now();
+      try {
+        if (message.provider === "mimo") {
+          if (!message.mimo) throw new Error("MiMo TTS 测试配置不完整。");
+          const result = await getMiMoPronunciation("hello", message.mimo);
+          sendResponse({
+            ok: true,
+            provider: "mimo",
+            latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+            preview: result.label ?? "已收到 WAV 音频",
+            message: "MiMo TTS 连接成功，已生成测试音频。"
+          });
+          return;
+        }
+
+        if (message.provider === "youdao") {
+          if (!message.youdao) throw new Error("有道测试配置不完整。");
+          const result = await getYoudaoPronunciation("hello", {
+            enabled: true,
+            appKey: message.youdao.appKey,
+            appSecret: message.youdao.appSecret
+          });
+          sendResponse({
+            ok: true,
+            provider: "youdao",
+            latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+            preview: result.phonetic ? "UK /" + result.phonetic + "/" : result.label,
+            message: "有道词典连接成功。"
+          });
+          return;
+        }
+
+        throw new Error("不支持的发音 Provider。");
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          provider: message.provider,
+          latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+          message: error instanceof Error ? error.message : "发音 API 测试失败。"
+        });
+      }
+      return;
+    }
+
+    if (message.type !== "PRONUNCIATION_GET" || typeof message.word !== "string") {
+      return;
+    }
+
     try {
       const settings = await loadLookupSettings();
       if (settings.pronunciation.provider === "off") {

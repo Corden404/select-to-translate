@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "右键查词工具",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "选中英文单词或句子后，结合上下文调用大模型进行快速解释。",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["http://*/*", "https://*/*"],

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildChatCompletionsUrl, streamOpenAiCompatible } from "../src/llm/openai-compatible";
+import { buildChatCompletionsUrl, streamOpenAiCompatible, testOpenAiCompatibleConnection } from "../src/llm/openai-compatible";
 import {
   DEFAULT_SETTINGS,
   DEFAULT_WORD_PROMPT,
@@ -46,6 +46,41 @@ describe("OpenAI-compatible provider config", () => {
     }
 
     expect(chunks.join("")).toBe("你好");
+  });
+
+  it("tests connectivity through the same streaming chat-completions path", async () => {
+    const originalFetch = globalThis.fetch;
+    const encoder = new TextEncoder();
+    let requestBody = "";
+
+    globalThis.fetch = async (_input, init) => {
+      requestBody = String(init?.body ?? "");
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"OK"}}]}\n\n'));
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        }
+      });
+      return new Response(stream, { status: 200 });
+    };
+
+    try {
+      const result = await testOpenAiCompatibleConnection({
+        baseUrl: "https://example.com/v1",
+        apiKey: "test-key",
+        model: "test-model",
+        timeoutMs: 5000
+      });
+      expect(result.preview).toBe("OK");
+      expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+      const body = JSON.parse(requestBody);
+      expect(body.stream).toBe(true);
+      expect(body.model).toBe("test-model");
+      expect(body.messages[0].content).toContain("connection test");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("does not append the path twice", () => {
