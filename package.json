@@ -1,18 +1,24 @@
 {
   "name": "selection-lookup",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run test && npm run build"
+    "check": "npm run typecheck && npm run test && npm run build",
+    "e2e": "npm run build && playwright test tests/e2e/extension.spec.ts --reporter=line --workers=1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/chrome": "^0.1.31",
-    "esbuild": "^0.25.9",
+    "@types/node": "^26.6.2",
+    "esbuild": "^0.28.2",
     "typescript": "^5.9.2",
-    "vitest": "^3.2.4"
+    "vitest": "^5.0.1"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.3.289"
   }
 }

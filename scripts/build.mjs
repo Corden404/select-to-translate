@@ -4,6 +4,8 @@ import { cp, mkdir, rm } from "node:fs/promises";
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist", { recursive: true });
 
+const browserTarget = ["chrome120", "edge120"];
+
 await Promise.all([
   build({
     entryPoints: ["src/content/main.ts"],
@@ -11,7 +13,7 @@ await Promise.all([
     bundle: true,
     format: "iife",
     platform: "browser",
-    target: ["chrome120", "edge120"],
+    target: browserTarget,
     sourcemap: true,
     logLevel: "info"
   }),
@@ -21,7 +23,7 @@ await Promise.all([
     bundle: true,
     format: "esm",
     platform: "browser",
-    target: ["chrome120", "edge120"],
+    target: browserTarget,
     sourcemap: true,
     logLevel: "info"
   }),
@@ -31,7 +33,27 @@ await Promise.all([
     bundle: true,
     format: "esm",
     platform: "browser",
-    target: ["chrome120", "edge120"],
+    target: browserTarget,
+    sourcemap: true,
+    logLevel: "info"
+  }),
+  build({
+    entryPoints: ["src/history-page/main.ts"],
+    outfile: "dist/history.js",
+    bundle: true,
+    format: "esm",
+    platform: "browser",
+    target: browserTarget,
+    sourcemap: true,
+    logLevel: "info"
+  }),
+  build({
+    entryPoints: ["src/pdf/main.ts"],
+    outfile: "dist/pdf.js",
+    bundle: true,
+    format: "esm",
+    platform: "browser",
+    target: browserTarget,
     sourcemap: true,
     logLevel: "info"
   })
@@ -39,7 +61,10 @@ await Promise.all([
 
 await Promise.all([
   cp("public/manifest.json", "dist/manifest.json"),
-  cp("public/popup.html", "dist/popup.html")
+  cp("public/popup.html", "dist/popup.html"),
+  cp("public/history.html", "dist/history.html"),
+  cp("public/pdf.html", "dist/pdf.html"),
+  cp("node_modules/pdfjs-dist/build/pdf.worker.mjs", "dist/pdf.worker.mjs")
 ]);
 
 console.log("Built extension into dist/");

@@ -1,7 +1,11 @@
 import { getSelectionAnchor } from "./anchor";
 import { extractContext } from "./context-extractor";
 import { FloatingCard, type CardQuery } from "./floating-card";
-import type { LookupPortResponse, LookupRequestPayload } from "../shared/messages";
+import type {
+  LookupPortResponse,
+  LookupRequestPayload,
+  PronunciationResponse
+} from "../shared/messages";
 import { classifySelection } from "../shared/selection";
 import {
   AUTO_LOOKUP_STORAGE_KEY,
@@ -9,6 +13,7 @@ import {
   SETTINGS_STORAGE_KEY,
   loadLookupSettings,
   normalizeSettings,
+  resolvePrompt,
   type LookupSettings
 } from "../shared/settings";
 
@@ -19,8 +24,13 @@ let activePort: chrome.runtime.Port | null = null;
 let activeRequestId = "";
 let settings: LookupSettings = DEFAULT_SETTINGS;
 
+const pronunciationCache = new Map<string, PronunciationResponse>();
+
 const card = new FloatingCard({
-  onRegenerate: query => startLookup(query),
+  onRegenerate: (query, promptId) => startLookup(query, promptId),
+  onPromptChange: (query, promptId) => startLookup(query, promptId),
+  onFollowUp: message => sendFollowUp(message),
+  onPronounce: word => getPronunciation(word),
   onDismiss: () => cancelActiveRequest()
 });
 
@@ -29,7 +39,6 @@ async function loadState(): Promise<void> {
     chrome.storage.local.get({ [AUTO_LOOKUP_STORAGE_KEY]: true }),
     loadLookupSettings()
   ]);
-
   enabled = stored[AUTO_LOOKUP_STORAGE_KEY] !== false;
   settings = loadedSettings;
   card.setAppearance(settings.ui);
@@ -51,9 +60,21 @@ function cancelActiveRequest(): void {
 function scheduleLookup(event?: Event): void {
   if (!enabled) return;
   if (event && card.containsEvent(event)) return;
-
   if (scheduled !== null) window.clearTimeout(scheduled);
-  scheduled = window.setTimeout(runLookup, 90);
+  scheduled = window.setTimeout(runLookup, 70);
+}
+
+function getSourceMetadata(): {
+  pageUrl: string;
+  pageTitle: string;
+  sourceType: "web" | "pdf";
+} {
+  const root = document.documentElement.dataset;
+  return {
+    pageUrl: root.lookupSourceUrl || location.href,
+    pageTitle: root.lookupSourceTitle || document.title,
+    sourceType: root.lookupSourceType === "pdf" ? "pdf" : "web"
+  };
 }
 
 function runLookup(): void {
@@ -76,11 +97,16 @@ function runLookup(): void {
   cancelActiveRequest();
   const context = extractContext(selection, classified.kind, classified.text);
   const query: CardQuery = { selection: classified, context };
-  card.show(query, anchor);
-  startLookup(query);
+  const prompt = resolvePrompt(settings, classified.kind);
+  card.show(query, anchor, settings, prompt.id);
+  startLookup(query, prompt.id);
+
+  if (classified.kind === "word" && settings.pronunciation.youdao.enabled) {
+    void card.preloadPronunciation();
+  }
 }
 
-function startLookup(query: CardQuery): void {
+function startLookup(query: CardQuery, promptId?: string): void {
   cancelActiveRequest();
 
   const requestId = crypto.randomUUID();
@@ -89,12 +115,14 @@ function startLookup(query: CardQuery): void {
   activePort = port;
   card.beginLoading();
 
+  const source = getSourceMetadata();
   const payload: LookupRequestPayload = {
     selectedText: query.selection.text,
     kind: query.selection.kind,
     context: query.context,
-    pageUrl: location.href,
-    pageTitle: document.title
+    pageUrl: source.pageUrl,
+    pageTitle: source.pageTitle,
+    sourceType: source.sourceType
   };
 
   port.onMessage.addListener((message: LookupPortResponse) => {
@@ -102,21 +130,26 @@ function startLookup(query: CardQuery): void {
 
     switch (message.type) {
       case "LOOKUP_STARTED":
+        card.setActivePrompt(message.promptId);
         break;
       case "LOOKUP_CHUNK":
         card.appendChunk(message.text);
         break;
       case "LOOKUP_DONE":
         card.complete();
-        activePort = null;
-        activeRequestId = "";
-        port.disconnect();
+        break;
+      case "CHAT_STARTED":
+        card.chatStarted();
+        break;
+      case "CHAT_CHUNK":
+        card.appendChatChunk(message.text);
+        break;
+      case "CHAT_DONE":
+        card.chatDone();
         break;
       case "LOOKUP_ERROR":
         card.showError(message.message);
-        activePort = null;
-        activeRequestId = "";
-        port.disconnect();
+        card.chatDone();
         break;
     }
   });
@@ -131,8 +164,35 @@ function startLookup(query: CardQuery): void {
   port.postMessage({
     type: "LOOKUP_START",
     requestId,
+    promptId,
     payload
   });
+}
+
+function sendFollowUp(message: string): void {
+  if (!activePort || !activeRequestId) {
+    card.showError("当前会话已经结束，请重新选择文本。");
+    return;
+  }
+  activePort.postMessage({
+    type: "CHAT_SEND",
+    requestId: activeRequestId,
+    message
+  });
+}
+
+async function getPronunciation(word: string): Promise<PronunciationResponse> {
+  const key = word.trim().toLowerCase();
+  const cached = pronunciationCache.get(key);
+  if (cached) return cached;
+
+  const response = await chrome.runtime.sendMessage({
+    type: "PRONUNCIATION_GET",
+    word
+  }) as PronunciationResponse;
+
+  if (response?.ok) pronunciationCache.set(key, response);
+  return response ?? { ok: false, message: "发音服务没有响应。" };
 }
 
 document.addEventListener("pointerdown", event => {
@@ -165,6 +225,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
   if (changes[SETTINGS_STORAGE_KEY]) {
     settings = normalizeSettings(changes[SETTINGS_STORAGE_KEY].newValue);
+    pronunciationCache.clear();
     card.setAppearance(settings.ui);
   }
 });

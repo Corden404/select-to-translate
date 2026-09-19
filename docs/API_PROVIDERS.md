@@ -34,6 +34,16 @@ MiMo 官方文档提供 OpenAI-compatible Chat Completions。查词场景默认�
 
 阿里云目前针对部分地域推荐业务空间专属域名，例如 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`。因此弹出页中的 Base URL 可直接编辑。
 
+## 有道智云词典（英式发音）
+
+- 词典接口：`https://openapi.youdao.com/v2/dict`
+- 官方文档：https://ai.youdao.com/DOCSIRMA/html/dictionary/api/ydcd/index.html
+- 鉴权：`signType=v3`，`sign=sha256(appKey + input + salt + curtime + appSecret)`
+- 英式音标字段：`ukPhonetic`
+- 英式音频字段：`ukSpeech`
+
+扩展只在用户显式启用并填写 AppKey / 应用密钥后调用该接口。服务权限、计费和数据使用规则以用户自己的有道智云账户与官方条款为准。
+
 ## 自定义 OpenAI-compatible
 
 只要服务提供 Bearer API Key，并兼容：

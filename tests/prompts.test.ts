@@ -4,7 +4,7 @@ import { DEFAULT_SETTINGS } from "../src/shared/settings";
 
 describe("lookup prompt construction", () => {
   it("marks page context as untrusted for word lookup", () => {
-    const messages = buildLookupMessages(DEFAULT_SETTINGS, {
+    const { messages } = buildLookupMessages(DEFAULT_SETTINGS, {
       selectedText: "detect",
       kind: "word",
       context: {
@@ -21,7 +21,7 @@ describe("lookup prompt construction", () => {
   });
 
   it("includes surrounding sentences for sentence lookup", () => {
-    const messages = buildLookupMessages(DEFAULT_SETTINGS, {
+    const { messages } = buildLookupMessages(DEFAULT_SETTINGS, {
       selectedText: "This is the selected sentence.",
       kind: "sentence",
       context: {

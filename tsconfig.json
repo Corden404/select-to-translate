@@ -6,7 +6,7 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "strict": true,
     "noEmit": true,
-    "types": ["chrome", "vitest/globals"],
+    "types": ["chrome", "vitest/globals", "node"],
     "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.mjs"]

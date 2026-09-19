@@ -16,7 +16,8 @@ const BLOCK_SELECTOR = [
   "DD",
   "DT",
   "PRE",
-  "FIGCAPTION"
+  "FIGCAPTION",
+  ".pdf-text-layer"
 ].join(",");
 
 interface SentenceSpan {
