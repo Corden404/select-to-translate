@@ -37,6 +37,7 @@ export class FloatingCard {
   private card: HTMLDivElement;
   private body: HTMLDivElement;
   private status: HTMLSpanElement;
+  private header: HTMLDivElement;
   private pinButton: HTMLButtonElement;
   private kindSelect: HTMLSelectElement;
   private promptSelect: HTMLSelectElement;
@@ -59,6 +60,15 @@ export class FloatingCard {
   private themePreference: UiTheme = "dark";
   private initialResponseText = "";
   private chatAssistantBubble: HTMLDivElement | null = null;
+  private activePronunciationAudio: HTMLAudioElement | null = null;
+  private manualPosition: { left: number; top: number } | null = null;
+  private dragState: {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    startLeft: number;
+    startTop: number;
+  } | null = null;
   private readonly callbacks: FloatingCardCallbacks;
   private readonly darkMedia = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -74,6 +84,7 @@ export class FloatingCard {
     this.host.style.zIndex = "2147483647";
     this.host.style.pointerEvents = "none";
     this.host.style.display = "none";
+    this.host.tabIndex = -1;
 
     this.shadow = this.host.attachShadow({ mode: "closed" });
     this.shadow.innerHTML = `
@@ -98,7 +109,9 @@ export class FloatingCard {
           --accent:#6657d9; --accent-soft:rgba(102,87,217,.12);
           box-shadow:0 14px 38px rgba(0,0,0,.18); color-scheme:light;
         }
-        .header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+        .header { display:flex; align-items:center; gap:8px; margin-bottom:10px; cursor:grab; user-select:none; touch-action:none; }
+        .header.dragging { cursor:grabbing; }
+        .header button, .header select { cursor:pointer; }
         .kind { padding:3px 7px; border:1px solid var(--border); border-radius:999px; background:var(--accent-soft); color:var(--text); font-size:.75em; font-weight:750; }
         .status { flex:1; min-width:0; color:var(--muted); font-size:.76em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         button, select, textarea { font:inherit; }
@@ -163,6 +176,7 @@ export class FloatingCard {
     this.card = this.shadow.querySelector(".card") as HTMLDivElement;
     this.body = this.shadow.querySelector(".body") as HTMLDivElement;
     this.status = this.shadow.querySelector(".status") as HTMLSpanElement;
+    this.header = this.shadow.querySelector(".header") as HTMLDivElement;
     this.pinButton = this.shadow.querySelector(".pin") as HTMLButtonElement;
     this.kindSelect = this.shadow.querySelector(".kind") as HTMLSelectElement;
     this.promptSelect = this.shadow.querySelector(".prompt") as HTMLSelectElement;
@@ -179,6 +193,10 @@ export class FloatingCard {
     this.latencySummary = this.latencyDetails.querySelector("summary") as HTMLElement;
     this.latencyBody = this.shadow.querySelector(".latency-body") as HTMLDivElement;
 
+    this.header.addEventListener("pointerdown", event => this.startDrag(event));
+    this.header.addEventListener("pointermove", event => this.moveDrag(event));
+    this.header.addEventListener("pointerup", event => this.endDrag(event));
+    this.header.addEventListener("pointercancel", event => this.endDrag(event));
     this.shadow.querySelector(".close")?.addEventListener("click", event => {
       if (!event.isTrusted) return;
       this.setPinned(false);
@@ -208,13 +226,18 @@ export class FloatingCard {
       if (!event.isTrusted) return;
       this.submitFollowUp();
     });
+    this.chatInput.addEventListener("focus", () => this.setTextEntryIsolation(true));
+    this.chatInput.addEventListener("blur", () => this.setTextEntryIsolation(false));
     this.chatInput.addEventListener("keydown", event => {
+      event.stopPropagation();
       if (!event.isTrusted) return;
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         this.submitFollowUp();
       }
     });
+    this.chatInput.addEventListener("keypress", event => event.stopPropagation());
+    this.chatInput.addEventListener("keyup", event => event.stopPropagation());
     this.pronunciationButton.addEventListener("click", event => {
       if (!event.isTrusted) return;
       void this.playPronunciation();
@@ -250,6 +273,13 @@ export class FloatingCard {
   }
 
   show(query: CardQuery, anchor: AnchorPoint, settings: PublicLookupSettings, promptId?: string): void {
+    const previousAnchor = this.anchor;
+    const sameAnchor = previousAnchor !== null
+      && Math.abs(previousAnchor.left - anchor.left) < 1
+      && Math.abs(previousAnchor.top - anchor.top) < 1
+      && Math.abs(previousAnchor.width - anchor.width) < 1
+      && Math.abs(previousAnchor.bottom - anchor.bottom) < 1;
+    if (!this.isVisible() || !sameAnchor) this.manualPosition = null;
     this.lastQuery = query;
     this.anchor = anchor;
     this.publicSettings = settings;
@@ -376,6 +406,11 @@ export class FloatingCard {
 
   hide(): void {
     if (!this.isVisible()) return;
+    this.setTextEntryIsolation(false);
+    this.endDrag();
+    if (this.publicSettings?.speechExplanation.stopOnCardClose) {
+      this.stopPronunciationAudio();
+    }
     this.host.style.display = "none";
     this.callbacks.onDismiss?.();
   }
@@ -479,7 +514,20 @@ export class FloatingCard {
         ? `英式 / ${result.phonetic} /${result.label ? " · " + result.label : ""}`
         : result.label ?? "英式发音";
       if (play && result.audioDataUrl) {
-        await new Audio(result.audioDataUrl).play();
+        this.stopPronunciationAudio();
+        const audio = new Audio(result.audioDataUrl);
+        this.activePronunciationAudio = audio;
+        const clearIfCurrent = () => {
+          if (this.activePronunciationAudio === audio) this.activePronunciationAudio = null;
+        };
+        audio.addEventListener("ended", clearIfCurrent, { once: true });
+        audio.addEventListener("error", clearIfCurrent, { once: true });
+        try {
+          await audio.play();
+        } catch (error) {
+          clearIfCurrent();
+          throw error;
+        }
       } else if (play && !result.audioDataUrl && this.publicSettings?.pronunciation.provider === "mimo") {
         this.pronunciationText.textContent += " · 暂无音频";
       }
@@ -488,6 +536,87 @@ export class FloatingCard {
     } finally {
       this.pronunciationButton.disabled = false;
     }
+  }
+
+  private stopPronunciationAudio(): void {
+    const audio = this.activePronunciationAudio;
+    this.activePronunciationAudio = null;
+    if (!audio) return;
+    audio.pause();
+    try {
+      audio.currentTime = 0;
+    } catch {
+      // Some browsers may reject seeking before media metadata is available.
+    }
+  }
+
+  private startDrag(event: PointerEvent): void {
+    if (!event.isTrusted || event.button !== 0 || !this.isVisible()) return;
+    const target = event.target;
+    if (target instanceof Element
+      && target.closest("button, select, input, textarea, a, [contenteditable='true']")) return;
+    const rect = this.card.getBoundingClientRect();
+    this.manualPosition = { left: rect.left, top: rect.top };
+    this.dragState = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startLeft: rect.left,
+      startTop: rect.top
+    };
+    this.header.classList.add("dragging");
+    this.header.setPointerCapture(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  private moveDrag(event: PointerEvent): void {
+    const drag = this.dragState;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    this.manualPosition = this.clampPosition(
+      drag.startLeft + event.clientX - drag.startX,
+      drag.startTop + event.clientY - drag.startY
+    );
+    this.applyPosition(this.manualPosition);
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  private endDrag(event?: PointerEvent): void {
+    const drag = this.dragState;
+    if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+    this.dragState = null;
+    this.header.classList.remove("dragging");
+    if (this.header.hasPointerCapture(drag.pointerId)) {
+      this.header.releasePointerCapture(drag.pointerId);
+    }
+    event?.stopPropagation();
+  }
+
+  private clampPosition(left: number, top: number): { left: number; top: number } {
+    const viewportPadding = 12;
+    const rect = this.card.getBoundingClientRect();
+    const maxLeft = Math.max(viewportPadding, window.innerWidth - rect.width - viewportPadding);
+    const maxTop = Math.max(viewportPadding, window.innerHeight - rect.height - viewportPadding);
+    return {
+      left: Math.max(viewportPadding, Math.min(left, maxLeft)),
+      top: Math.max(viewportPadding, Math.min(top, maxTop))
+    };
+  }
+
+  private applyPosition(position: { left: number; top: number }): void {
+    this.card.style.left = `${Math.round(position.left)}px`;
+    this.card.style.top = `${Math.round(position.top)}px`;
+  }
+
+  private setTextEntryIsolation(active: boolean): void {
+    if (active) {
+      this.host.setAttribute("contenteditable", "true");
+      this.host.dataset.lookupTextEntry = "true";
+      return;
+    }
+    this.host.removeAttribute("contenteditable");
+    delete this.host.dataset.lookupTextEntry;
   }
 
   private openChat(): void {
@@ -570,14 +699,20 @@ export class FloatingCard {
 
   private position(): void {
     if (!this.anchor) return;
-    const margin=10, viewportPadding=12, rect=this.card.getBoundingClientRect();
-    let left=this.anchor.left+this.anchor.width/2-rect.width/2;
-    left=Math.max(viewportPadding,Math.min(left,window.innerWidth-rect.width-viewportPadding));
-    let top=this.anchor.bottom+margin;
-    if (top+rect.height>window.innerHeight-viewportPadding) {
-      top=Math.max(viewportPadding,this.anchor.top-rect.height-margin);
+    if (this.manualPosition) {
+      this.manualPosition = this.clampPosition(this.manualPosition.left, this.manualPosition.top);
+      this.applyPosition(this.manualPosition);
+      return;
     }
-    this.card.style.left=`${Math.round(left)}px`;
-    this.card.style.top=`${Math.round(top)}px`;
+    const margin = 10;
+    const viewportPadding = 12;
+    const rect = this.card.getBoundingClientRect();
+    let left = this.anchor.left + this.anchor.width / 2 - rect.width / 2;
+    left = Math.max(viewportPadding, Math.min(left, window.innerWidth - rect.width - viewportPadding));
+    let top = this.anchor.bottom + margin;
+    if (top + rect.height > window.innerHeight - viewportPadding) {
+      top = Math.max(viewportPadding, this.anchor.top - rect.height - margin);
+    }
+    this.applyPosition({ left, top });
   }
 }

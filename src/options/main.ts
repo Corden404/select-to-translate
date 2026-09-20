@@ -80,7 +80,7 @@ const testPronunciation=byId<HTMLButtonElement>("testPronunciation");
 const pronunciationTestStatus=byId<HTMLSpanElement>("pronunciationTestStatus");
 const autoSpeechExplanation=byId<HTMLInputElement>("autoSpeechExplanation");
 const speechExplanationDetails=byId<HTMLDivElement>("speechExplanationDetails");
-const stopSpeechOnCardClose=byId<HTMLInputElement>("stopSpeechOnCardClose");
+const stopAudioOnCardClose=byId<HTMLInputElement>("stopAudioOnCardClose");
 const speechPlaybackRate=byId<HTMLSelectElement>("speechPlaybackRate");
 const speechModelProvider=byId<HTMLSelectElement>("speechModelProvider");
 const speechModel=byId<HTMLInputElement>("speechModel");
@@ -368,7 +368,7 @@ async function loadForm():Promise<void>{
   youdaoKey.value=working.pronunciation.youdao.appKey;
   youdaoSecret.value=working.pronunciation.youdao.appSecret;
   autoSpeechExplanation.checked=working.speechExplanation.enabled;
-  stopSpeechOnCardClose.checked=working.speechExplanation.stopOnCardClose;
+  stopAudioOnCardClose.checked=working.speechExplanation.stopOnCardClose;
   speechPlaybackRate.value=String(working.speechExplanation.playbackRate);
   speechModelProvider.value=working.speechExplanation.modelProvider;
   speechModel.value=working.speechExplanation.model;
@@ -590,7 +590,7 @@ save.addEventListener("click",()=>{
     };
     working.speechExplanation={
       enabled:autoSpeechExplanation.checked,
-      stopOnCardClose:stopSpeechOnCardClose.checked,
+      stopOnCardClose:stopAudioOnCardClose.checked,
       playbackRate:Number(speechPlaybackRate.value)||DEFAULT_SETTINGS.speechExplanation.playbackRate,
       modelProvider:speechModelProvider.value as SpeechModelProviderId,
       model:speechModelProvider.value==="main"?"":speechModel.value.trim(),

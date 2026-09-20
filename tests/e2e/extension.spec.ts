@@ -81,7 +81,8 @@ test("extension security, lookup, history, settings, and PDF work end to end", a
         }
 
         const followUp = Boolean(body.messages?.some(message =>
-          message.role === "user" && message.content?.includes("为什么")
+          message.role === "user"
+          && (message.content?.includes("为什么") || message.content?.includes("keyboard test"))
         ));
         const connectionTest = Boolean(body.messages?.some(message =>
           message.content?.includes("connection test")
@@ -156,6 +157,8 @@ test("extension security, lookup, history, settings, and PDF work end to end", a
     await expect(popup.getByText("发音设置")).toBeVisible();
     await expect(popup.locator("#pronunciationProvider")).toHaveValue("mimo");
     await expect(popup.locator("#mimoVoice")).toHaveValue("Mia");
+    await expect(popup.locator("#stopAudioOnCardClose")).toBeVisible();
+    await expect(popup.locator("#stopAudioOnCardClose")).toBeChecked();
 
     await popup.locator("#provider").selectOption("custom");
     await popup.locator("#apiKey").fill("test-key");
@@ -258,6 +261,135 @@ test("extension security, lookup, history, settings, and PDF work end to end", a
     expect(Date.now() - displayStartedAt).toBeLessThan(500);
     await expect.poll(() => initialLookupRequests).toBe(1);
     expect(await page.evaluate(() => document.getElementById("__selection_lookup_root__")!.shadowRoot)).toBeNull();
+
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("DOM.enable");
+    type CdpNode = {
+      nodeId: number;
+      attributes?: string[];
+      children?: CdpNode[];
+      shadowRoots?: CdpNode[];
+    };
+    const findNodeByClass = (node: CdpNode, className: string): number | null => {
+      const attributes = node.attributes ?? [];
+      for (let index = 0; index + 1 < attributes.length; index += 2) {
+        if (attributes[index] === "class"
+          && attributes[index + 1].split(/\s+/).includes(className)) {
+          return node.nodeId;
+        }
+      }
+      for (const child of [...(node.shadowRoots ?? []), ...(node.children ?? [])]) {
+        const found = findNodeByClass(child, className);
+        if (found !== null) return found;
+      }
+      return null;
+    };
+    const getClosedShadowNodeId = async (className: string): Promise<number> => {
+      const { root } = await cdp.send("DOM.getDocument", { depth: -1, pierce: true });
+      const nodeId = findNodeByClass(root as unknown as CdpNode, className);
+      if (nodeId === null) throw new Error("Closed-shadow node not found: " + className);
+      return nodeId;
+    };
+    const clickClosedShadowNode = async (className: string): Promise<void> => {
+      const nodeId = await getClosedShadowNodeId(className);
+      const { model } = await cdp.send("DOM.getBoxModel", { nodeId });
+      const quad = model.border;
+      const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
+      const y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
+      await page.mouse.click(x, y);
+    };
+    const getClosedShadowBox = async (className: string) => {
+      const nodeId = await getClosedShadowNodeId(className);
+      const { model } = await cdp.send("DOM.getBoxModel", { nodeId });
+      const quad = model.border;
+      const xs = [quad[0], quad[2], quad[4], quad[6]];
+      const ys = [quad[1], quad[3], quad[5], quad[7]];
+      const left = Math.min(...xs);
+      const right = Math.max(...xs);
+      const top = Math.min(...ys);
+      const bottom = Math.max(...ys);
+      return { left, right, top, bottom, width: right - left, height: bottom - top };
+    };
+
+    const cardBeforeDrag = await getClosedShadowBox("card");
+    const statusBeforeDrag = await getClosedShadowBox("status");
+    const dragStartX = statusBeforeDrag.left + statusBeforeDrag.width / 2;
+    const dragStartY = statusBeforeDrag.top + statusBeforeDrag.height / 2;
+    await page.mouse.move(dragStartX, dragStartY);
+    await page.mouse.down();
+    await page.mouse.move(dragStartX + 90, dragStartY + 60, { steps: 5 });
+    await page.mouse.up();
+    const cardAfterDrag = await getClosedShadowBox("card");
+    expect(cardAfterDrag.left - cardBeforeDrag.left).toBeGreaterThan(50);
+    expect(cardAfterDrag.top - cardBeforeDrag.top).toBeGreaterThan(30);
+
+    const statusAfterDrag = await getClosedShadowBox("status");
+    const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    await page.mouse.move(
+      statusAfterDrag.left + statusAfterDrag.width / 2,
+      statusAfterDrag.top + statusAfterDrag.height / 2
+    );
+    await page.mouse.down();
+    await page.mouse.move(viewport.width + 1000, viewport.height + 1000, { steps: 5 });
+    await page.mouse.up();
+    const boundedCard = await getClosedShadowBox("card");
+    expect(boundedCard.right).toBeLessThanOrEqual(viewport.width - 10);
+    expect(boundedCard.bottom).toBeLessThanOrEqual(viewport.height - 10);
+
+    await expect.poll(async () => {
+      const nodeId = await getClosedShadowNodeId("follow-up");
+      const { attributes } = await cdp.send("DOM.getAttributes", { nodeId });
+      return attributes.includes("disabled");
+    }).toBe(false);
+    await page.evaluate(() => {
+      const counters = { bubble: 0, captureEditableAware: 0 };
+      (window as typeof window & { __lookupShortcutCounters?: typeof counters }).__lookupShortcutCounters = counters;
+      document.addEventListener("keydown", () => {
+        counters.bubble += 1;
+      });
+      document.addEventListener("keydown", event => {
+        const target = event.target;
+        if (target instanceof HTMLElement
+          && (target.isContentEditable || target.matches("input, textarea, select"))) {
+          return;
+        }
+        counters.captureEditableAware += 1;
+      }, true);
+    });
+    await clickClosedShadowNode("follow-up");
+    await expect.poll(() => page.evaluate(() =>
+      document.getElementById("__selection_lookup_root__")?.dataset.lookupTextEntry
+    )).toBe("true");
+
+    const chatInputNodeId = await getClosedShadowNodeId("chat-input");
+    const resolvedChatInput = await cdp.send("DOM.resolveNode", { nodeId: chatInputNodeId });
+    const chatInputObjectId = resolvedChatInput.object.objectId;
+    if (!chatInputObjectId) throw new Error("Unable to resolve chat input");
+    const chatInputValue = async (): Promise<string> => {
+      const result = await cdp.send("Runtime.callFunctionOn", {
+        objectId: chatInputObjectId,
+        functionDeclaration: "function(){ return this.value; }",
+        returnByValue: true
+      });
+      return String(result.result.value ?? "");
+    };
+
+    await page.keyboard.type("keyboard test");
+    await page.keyboard.press("Shift+Enter");
+    await page.keyboard.type("more");
+    expect(await chatInputValue()).toBe("keyboard test\nmore");
+    expect(await page.evaluate(() =>
+      (window as typeof window & {
+        __lookupShortcutCounters?: { bubble: number; captureEditableAware: number };
+      }).__lookupShortcutCounters
+    )).toEqual({ bubble: 0, captureEditableAware: 0 });
+    await page.keyboard.press("Enter");
+    await expect.poll(() => followUpRequests).toBe(1);
+    expect(await page.evaluate(() =>
+      (window as typeof window & {
+        __lookupShortcutCounters?: { bubble: number; captureEditableAware: number };
+      }).__lookupShortcutCounters
+    )).toEqual({ bubble: 0, captureEditableAware: 0 });
 
     await page.evaluate(() => window.scrollTo(0, 600));
     await expect.poll(() => page.evaluate(() => document.getElementById("__selection_lookup_root__")!.style.display)).toBe("none");
