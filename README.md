@@ -81,8 +81,4 @@ MiMo TTS API Key 可以单独填写；若主模型平台就是小米 MiMo，TTS 
 
 默认只把选中文字与必要上下文发送到用户配置的大模型 API。手动 MiMo 发音会在点击发音按钮后发送当前词；开启自动语音解释后，同一份选词与语境会额外发送给用户选择的口语稿模型生成英文语音稿，语音稿随后发送到 MiMo TTS。切换到有道时只查询词典英式音标，不下载音频。查询历史可完全关闭新写入，也可按保留天数和最大条数自动清理；数据只写入当前浏览器的 IndexedDB。API Key 与发音服务密钥不会发送给网页 content script。
 
-详细产品定义见 [PRODUCT.md](./PRODUCT.md)。
-
-技术架构见 [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md)。
-
 API 资料见 [docs/API_PROVIDERS.md](./docs/API_PROVIDERS.md)。
