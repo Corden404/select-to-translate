@@ -1,11 +1,16 @@
 import { clearHistory, deleteHistoryRecord, listHistory } from "../history/db";
 import type { LookupHistoryRecord } from "../history/types";
+import { loadLookupSettings } from "../shared/settings";
 
 const search=document.getElementById("search") as HTMLInputElement;
 const list=document.getElementById("list") as HTMLDivElement;
 const refresh=document.getElementById("refresh") as HTMLButtonElement;
 const clear=document.getElementById("clear") as HTMLButtonElement;
+const loadMore=document.getElementById("loadMore") as HTMLButtonElement;
+const count=document.getElementById("count") as HTMLSpanElement;
 let records:LookupHistoryRecord[]=[];
+let visibleCount=100;
+const PAGE_SIZE=100;
 
 function text(tag:string,className:string,value:string):HTMLElement{
   const el=document.createElement(tag);
@@ -52,8 +57,11 @@ function render():void{
     ...record.messages.map(message=>message.content)
   ].join(" ").toLowerCase().includes(q));
   list.replaceChildren();
+  const visible=filtered.slice(0,visibleCount);
+  count.textContent=`已加载 ${records.length} 条 · 当前显示 ${visible.length} 条`;
+  loadMore.hidden=visible.length>=filtered.length;
   if(filtered.length===0){list.append(text("div","empty",q?"没有匹配的历史记录。":"还没有查词历史。"));return;}
-  for(const record of filtered){
+  for(const record of visible){
     const item=document.createElement("article");item.className="item";
     const summary=document.createElement("div");summary.className="summary";
     summary.append(text("div","word",record.selectedText),text("div","meta",(record.sourceType==="pdf"?"PDF · ":"")+sourceLabel(record)+" · "+record.prompt.name),text("div","time",formatDate(record.createdAt)));
@@ -62,7 +70,14 @@ function render():void{
   }
 }
 
-async function load():Promise<void>{records=await listHistory(500);render();}
-search.addEventListener("input",render);refresh.addEventListener("click",()=>void load());
+async function load():Promise<void>{
+  const settings=await loadLookupSettings();
+  records=await listHistory(settings.history.maxEntries);
+  visibleCount=PAGE_SIZE;
+  render();
+}
+search.addEventListener("input",()=>{visibleCount=PAGE_SIZE;render();});
+refresh.addEventListener("click",()=>void load());
+loadMore.addEventListener("click",()=>{visibleCount+=PAGE_SIZE;render();});
 clear.addEventListener("click",()=>{if(confirm("确定清空全部查词历史吗？"))void clearHistory().then(load);});
 void load();

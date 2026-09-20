@@ -86,6 +86,19 @@ test("extension security, lookup, history, settings, and PDF work end to end", a
         const connectionTest = Boolean(body.messages?.some(message =>
           message.content?.includes("connection test")
         ));
+        const partialFailure = Boolean(body.messages?.some(message =>
+          message.content?.includes("[SELECTED TEXT]\npartialfail")
+        ));
+        if (partialFailure) {
+          initialLookupRequests += 1;
+          res.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache"
+          });
+          res.write("data: " + JSON.stringify({ choices: [{ delta: { content: "部分回答" } }] }) + "\n\n");
+          res.end("data: " + JSON.stringify({ error: { message: "forced partial failure" } }) + "\n\n");
+          return;
+        }
         if (followUp) {
           followUpRequests += 1;
         } else if (!connectionTest) {
@@ -112,7 +125,7 @@ test("extension security, lookup, history, settings, and PDF work end to end", a
     }
 
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end("<!doctype html><html><body><p id='p'>A reliable lookup tool can <span id='word'>detect</span> the meaning of a word in context.</p><button id='other'>Elsewhere</button></body></html>");
+    res.end("<!doctype html><html><body><p id='p'>A reliable lookup tool can <span id='word'>detect</span> the meaning of a word in context. Another test uses <span id='partial'>partialfail</span>.</p><div id='editor' contenteditable='true'>editable</div><button id='other'>Elsewhere</button><div style='height:2000px'></div></body></html>");
   });
 
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -138,7 +151,7 @@ test("extension security, lookup, history, settings, and PDF work end to end", a
     const extensionId = new URL(worker.url()).host;
 
     const popup = await context.newPage();
-    await popup.goto("chrome-extension://" + extensionId + "/popup.html");
+    await popup.goto("chrome-extension://" + extensionId + "/options.html");
     await expect(popup.getByText("Prompt 管理")).toBeVisible();
     await expect(popup.getByText("发音设置")).toBeVisible();
     await expect(popup.locator("#pronunciationProvider")).toHaveValue("mimo");
@@ -230,6 +243,10 @@ test("extension security, lookup, history, settings, and PDF work end to end", a
     await page.waitForTimeout(180);
     expect(initialLookupRequests).toBe(0);
 
+    await page.locator("#editor").dblclick();
+    await page.waitForTimeout(180);
+    expect(initialLookupRequests).toBe(0);
+
     const displayStartedAt = Date.now();
     await page.locator("#word").dblclick();
     await expect.poll(() => page.evaluate(() => getSelection()?.toString().trim())).toBe("detect");
@@ -242,11 +259,61 @@ test("extension security, lookup, history, settings, and PDF work end to end", a
     await expect.poll(() => initialLookupRequests).toBe(1);
     expect(await page.evaluate(() => document.getElementById("__selection_lookup_root__")!.shadowRoot)).toBeNull();
 
+    await page.evaluate(() => window.scrollTo(0, 600));
+    await expect.poll(() => page.evaluate(() => document.getElementById("__selection_lookup_root__")!.style.display)).toBe("none");
+    await page.evaluate(() => window.scrollTo(0, 0));
+
+    const setBehavior = async (mode: "auto" | "manual", paused: boolean) => {
+      await worker.evaluate(async ({ host, mode, paused }) => {
+        const stored = await chrome.storage.local.get("lookupSettings");
+        const settings = stored.lookupSettings as {
+          behavior: { mode: "auto" | "manual"; disabledHosts: string[] };
+        };
+        settings.behavior.mode = mode;
+        settings.behavior.disabledHosts = paused ? [host] : [];
+        await chrome.storage.local.set({ lookupSettings: settings });
+      }, { host: "127.0.0.1", mode, paused });
+      await page.waitForTimeout(120);
+    };
+    const triggerManual = async () => {
+      await worker.evaluate(async targetUrl => {
+        const tabs = await chrome.tabs.query({});
+        const tab = tabs.find(item => item.url === targetUrl);
+        if (typeof tab?.id !== "number") throw new Error("test page tab not found");
+        await chrome.tabs.sendMessage(tab.id, { type: "MANUAL_LOOKUP_TRIGGER" });
+      }, origin + "/");
+    };
+
+    await setBehavior("auto", true);
+    await page.locator("#word").dblclick();
+    await page.waitForTimeout(180);
+    expect(initialLookupRequests).toBe(1);
+    await triggerManual();
+    await expect.poll(() => initialLookupRequests).toBe(2);
+
+    await setBehavior("manual", false);
+    await page.locator("#word").dblclick();
+    await page.waitForTimeout(180);
+    expect(initialLookupRequests).toBe(2);
+    await triggerManual();
+    await expect.poll(() => initialLookupRequests).toBe(3);
+    await page.evaluate(() => window.scrollTo(0, 600));
+    await expect.poll(() => page.evaluate(() => document.getElementById("__selection_lookup_root__")!.style.display)).toBe("none");
+    await page.evaluate(() => window.scrollTo(0, 0));
+
+    await setBehavior("auto", false);
+    await page.locator("#partial").dblclick();
+    await expect.poll(() => initialLookupRequests).toBe(4);
+    await page.waitForTimeout(180);
+
     const history = await context.newPage();
     await history.goto("chrome-extension://" + extensionId + "/history.html");
     await expect(history.getByText("detect", { exact: true }).first()).toBeVisible();
-    await history.getByText("detect", { exact: true }).first().click();
-    await expect(history.getByText("初始解释", { exact: true }).first()).toBeVisible();
+    await history.locator("#search").fill("partialfail");
+    await expect(history.getByText("partialfail", { exact: true }).first()).toBeVisible();
+    await history.getByText("partialfail", { exact: true }).first().click();
+    await expect(history.getByText("部分回答", { exact: true }).first()).toBeVisible();
+    await expect(history.getByText(/forced partial failure/)).toBeVisible();
 
     const pdf = await context.newPage();
     await pdf.goto(
@@ -272,13 +339,13 @@ test("extension security, lookup, history, settings, and PDF work end to end", a
       undefined,
       { timeout: 3000 }
     );
-    await expect.poll(() => initialLookupRequests).toBe(2);
+    await expect.poll(() => initialLookupRequests).toBe(5);
     expect(await pdf.evaluate(() => document.getElementById("__selection_lookup_root__")!.shadowRoot)).toBeNull();
 
     await pdf.goto(
       "chrome-extension://" + extensionId + "/pdf.html?src=" + encodeURIComponent(origin + "/blank.pdf")
     );
-    await expect(pdf.getByText(/扫描型 PDF 暂不支持 OCR/)).toBeVisible();
+    await expect(pdf.getByText(/抽样页面未检测到可选择文本/)).toBeVisible();
   } finally {
     await context.close();
     server.close();

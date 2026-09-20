@@ -28,8 +28,8 @@ await Promise.all([
     logLevel: "info"
   }),
   build({
-    entryPoints: ["src/popup/main.ts"],
-    outfile: "dist/popup.js",
+    entryPoints: ["src/options/main.ts"],
+    outfile: "dist/options.js",
     bundle: true,
     format: "esm",
     platform: "browser",
@@ -70,8 +70,9 @@ await Promise.all([
 ]);
 
 await Promise.all([
+  cp("public/icons", "dist/icons", { recursive: true }),
   cp("public/manifest.json", "dist/manifest.json"),
-  cp("public/popup.html", "dist/popup.html"),
+  cp("public/options.html", "dist/options.html"),
   cp("public/offscreen.html", "dist/offscreen.html"),
   cp("public/history.html", "dist/history.html"),
   cp("public/pdf.html", "dist/pdf.html"),

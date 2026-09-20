@@ -111,6 +111,7 @@ export class FloatingCard {
         .pronunciation.visible { display:flex; }
         .body { min-height:22px; white-space:pre-wrap; overflow-wrap:anywhere; }
         .body.error { color:#ff8e8e; }
+        .stream-error { margin-top:9px; padding:7px 9px; border-radius:8px; background:rgba(255,110,110,.10); color:#ff8e8e; font-size:.82em; }
         .context { margin-top:11px; padding-top:9px; border-top:1px solid var(--border); color:var(--muted); font-size:.78em; white-space:pre-wrap; overflow-wrap:anywhere; }
         .toolbar { display:flex; align-items:center; gap:7px; margin-top:11px; flex-wrap:wrap; }
         .speech-replay { display:none; } .speech-replay.visible { display:inline-block; }
@@ -236,6 +237,11 @@ export class FloatingCard {
     this.hide();
   }
 
+  handleDocumentScroll(event: Event): void {
+    if (!this.isVisible() || this.pinned || this.containsEvent(event)) return;
+    this.hide();
+  }
+
   setAppearance(settings: PublicLookupSettings["ui"]): void {
     this.themePreference = settings.theme;
     this.applyResolvedTheme();
@@ -325,10 +331,19 @@ export class FloatingCard {
   }
 
   showError(message: string): void {
-    this.status.textContent = "请求失败";
-    this.body.classList.add("error");
-    this.body.textContent = message;
+    this.status.textContent = this.initialResponseText ? "生成中断" : "请求失败";
     this.followUpButton.disabled = true;
+    if (this.initialResponseText) {
+      this.body.classList.remove("error");
+      this.body.textContent = this.initialResponseText;
+      const notice = document.createElement("div");
+      notice.className = "stream-error";
+      notice.textContent = "生成中断：" + message;
+      this.body.append(notice);
+    } else {
+      this.body.classList.add("error");
+      this.body.textContent = message;
+    }
     this.position();
   }
 

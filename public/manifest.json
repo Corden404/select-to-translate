@@ -3,20 +3,37 @@
   "name": "右键查词工具",
   "version": "0.5.0",
   "description": "选中英文单词或句子后，结合上下文调用大模型进行快速解释。",
-  "permissions": ["storage", "activeTab", "offscreen"],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": ["storage", "activeTab", "offscreen", "contextMenus"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
   "action": {
-    "default_title": "右键查词工具",
-    "default_popup": "popup.html"
+    "default_title": "打开右键查词工具设置",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
   },
   "commands": {
     "toggle-auto-lookup": {
       "suggested_key": {"default": "Alt+Shift+L"},
-      "description": "开启或关闭自动查词"
+      "description": "开启或关闭查词功能"
+    },
+    "lookup-selection": {
+      "suggested_key": {"default": "Alt+Shift+D"},
+      "description": "手动查询当前选中的英文文本"
     }
   },
   "content_scripts": [

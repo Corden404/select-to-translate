@@ -62,6 +62,10 @@ export interface PublicSettingsChangedMessage {
   settings: PublicLookupSettings;
 }
 
+export interface ManualLookupTriggerMessage {
+  type: "MANUAL_LOOKUP_TRIGGER";
+}
+
 function looksLikePublicSettings(value: unknown): value is PublicLookupSettings {
   if (!value || typeof value !== "object") return false;
   const settings = value as Partial<PublicLookupSettings>;
@@ -70,6 +74,11 @@ function looksLikePublicSettings(value: unknown): value is PublicLookupSettings 
     && !("api" in rawSettings)
     && (settings.ui.theme === "dark" || settings.ui.theme === "light" || settings.ui.theme === "system")
     && (settings.ui.fontSize === "small" || settings.ui.fontSize === "medium" || settings.ui.fontSize === "large")
+    && !!settings.behavior
+    && (settings.behavior.mode === "auto" || settings.behavior.mode === "manual")
+    && Array.isArray(settings.behavior.disabledHosts)
+    && settings.behavior.disabledHosts.every(host => typeof host === "string")
+    && typeof settings.behavior.skipEditable === "boolean"
     && !!settings.pronunciation
     && (settings.pronunciation.provider === "mimo"
       || settings.pronunciation.provider === "youdao"

@@ -13,7 +13,12 @@ const FINITE_OR_AUXILIARY = new Set([
   "am", "is", "are", "was", "were", "have", "has", "had", "do", "does", "did",
   "can", "could", "will", "would", "shall", "should", "may", "might", "must",
   "love", "like", "want", "need", "know", "think", "see", "feel", "mean", "agree",
-  "believe", "understand", "work", "works", "matter", "matters", "seem", "seems"
+  "believe", "understand", "work", "works", "worked", "matter", "matters", "seem", "seems",
+  "fail", "fails", "failed", "help", "helps", "helped", "show", "shows", "showed", "use", "uses",
+  "used", "make", "makes", "made", "become", "becomes", "became", "remain", "remains", "remained"
+]);
+const SUBJECT_DETERMINERS = new Set([
+  "my", "your", "his", "her", "our", "their", "this", "that", "these", "those"
 ]);
 const NON_VERB_AFTER_SUBJECT = new Set([
   "a", "an", "the", "my", "your", "his", "her", "our", "their",
@@ -33,6 +38,7 @@ function looksLikeShortClause(text: string, wordCount: number): boolean {
   }
 
   if ((first === "this" || first === "that") && FINITE_OR_AUXILIARY.has(second)) return true;
+  if (SUBJECT_DETERMINERS.has(first) && wordCount >= 3 && FINITE_OR_AUXILIARY.has(third)) return true;
   if ((first === "the" || first === "a" || first === "an") && wordCount >= 3 && third) {
     return FINITE_OR_AUXILIARY.has(third) || /(?:s|ed)$/.test(third);
   }

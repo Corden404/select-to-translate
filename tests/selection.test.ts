@@ -35,12 +35,17 @@ describe("selection helpers", () => {
     expect(classifySelection("I love this book")?.kind).toBe("sentence");
     expect(classifySelection("You are absolutely right")?.kind).toBe("sentence");
     expect(classifySelection("I agree")?.kind).toBe("sentence");
+    expect(classifySelection("This method works")?.kind).toBe("sentence");
+    expect(classifySelection("My code failed")?.kind).toBe("sentence");
+    expect(classifySelection("Your plan matters")?.kind).toBe("sentence");
   });
 
   it("keeps short lexical phrases in word mode", () => {
     expect(classifySelection("take for granted")?.kind).toBe("word");
     expect(classifySelection("in the morning")?.kind).toBe("word");
     expect(classifySelection("absolutely right")?.kind).toBe("word");
+    expect(classifySelection("my morning routine")?.kind).toBe("word");
+    expect(classifySelection("your account settings")?.kind).toBe("word");
   });
 
   it("rejects selections above 30 English words", () => {

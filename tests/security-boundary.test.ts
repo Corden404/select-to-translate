@@ -21,6 +21,17 @@ describe("content-script secret boundary", () => {
     expect(contentSource).toContain("!event.isTrusted");
     expect(cardSource).toContain('attachShadow({ mode: "closed" })');
     expect(cardSource).toContain("!event.isTrusted");
+    expect(contentSource).toContain("eventTargetsEditable");
+    expect(contentSource).toContain("MANUAL_LOOKUP_TRIGGER");
+  });
+
+  it("ships explicit manual lookup entry points", () => {
+    const manifest = JSON.parse(readFileSync(new URL("../public/manifest.json", import.meta.url), "utf8"));
+    expect(manifest.permissions).toContain("contextMenus");
+    expect(manifest.commands["lookup-selection"]).toBeTruthy();
+    const workerSource = readFileSync(new URL("../src/background/service-worker.ts", import.meta.url), "utf8");
+    expect(workerSource).toContain("MANUAL_LOOKUP_MENU_ID");
+    expect(workerSource).toContain("sendManualLookup");
   });
 
   it("public settings structurally omit privileged configuration", () => {

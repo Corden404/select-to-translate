@@ -1,4 +1,5 @@
 import type { ConnectionTestResponse } from "../shared/messages";
+import { OPTIONS_SOURCE_STORAGE_KEY, isOptionsSourceTab } from "../shared/options-source";
 import {
   AUTO_LOOKUP_STORAGE_KEY,
   DEFAULT_PROMPTS,
@@ -8,11 +9,13 @@ import {
   loadLookupSettings,
   normalizeSettings,
   type LookupSettings,
+  type LookupTriggerMode,
   type MimoVoiceId,
   type PronunciationProviderId,
   type PromptApplicableType,
   type PromptDefinition,
   type ProviderId,
+  type SpeechModelProviderId,
   type UiFontSize,
   type UiTheme
 } from "../shared/settings";
@@ -24,6 +27,11 @@ function byId<T extends HTMLElement>(id:string):T{
 }
 
 const autoLookup=byId<HTMLInputElement>("autoLookup");
+const lookupMode=byId<HTMLSelectElement>("lookupMode");
+const skipEditable=byId<HTMLInputElement>("skipEditable");
+const manualLookupNow=byId<HTMLButtonElement>("manualLookupNow");
+const siteToggle=byId<HTMLButtonElement>("siteToggle");
+const siteStatus=byId<HTMLParagraphElement>("siteStatus");
 const provider=byId<HTMLSelectElement>("provider");
 const providerNote=byId<HTMLParagraphElement>("providerNote");
 const apiKey=byId<HTMLInputElement>("apiKey");
@@ -74,16 +82,78 @@ const autoSpeechExplanation=byId<HTMLInputElement>("autoSpeechExplanation");
 const speechExplanationDetails=byId<HTMLDivElement>("speechExplanationDetails");
 const stopSpeechOnCardClose=byId<HTMLInputElement>("stopSpeechOnCardClose");
 const speechPlaybackRate=byId<HTMLSelectElement>("speechPlaybackRate");
+const speechModelProvider=byId<HTMLSelectElement>("speechModelProvider");
+const speechModel=byId<HTMLInputElement>("speechModel");
+const speechModelSuggestions=byId<HTMLDataListElement>("speechModelSuggestions");
 const speechExplanationPrompt=byId<HTMLTextAreaElement>("speechExplanationPrompt");
 const speechTtsStyle=byId<HTMLTextAreaElement>("speechTtsStyle");
 
 let working:LookupSettings=structuredClone(DEFAULT_SETTINGS);
 let editingPromptId="";
 let activeProvider:ProviderId=DEFAULT_SETTINGS.api.provider;
+let sourceTabId:number|null=null;
+let sourceTabUrl="";
+let sourceTabTitle="";
+let currentSiteHost="";
+const SOURCE_MAX_AGE_MS=10*60*1000;
 
 function selectedProvider():ProviderId{
   const value=provider.value as ProviderId;
   return value in PROVIDER_PRESETS?value:"custom";
+}
+
+function siteHost(url:string|undefined):string{
+  if(!url) return "";
+  try{
+    const parsed=new URL(url);
+    return parsed.protocol==="http:"||parsed.protocol==="https:"?parsed.hostname.toLowerCase():"";
+  }catch{return "";}
+}
+
+function renderSiteControls():void{
+  manualLookupNow.disabled=sourceTabId===null;
+  if(sourceTabId===null){
+    siteToggle.hidden=true;
+    siteStatus.textContent="从网页点击扩展图标打开此设置页后，可在这里手动查询来源页面选区或暂停该网站。快捷键：Alt + Shift + D。";
+    return;
+  }
+  if(!currentSiteHost){
+    siteToggle.hidden=true;
+    siteStatus.textContent=`来源页面：${sourceTabTitle||sourceTabUrl||"当前标签页"}。该页面不支持网站级自动查词控制。`;
+    return;
+  }
+  siteToggle.hidden=false;
+  const paused=working.behavior.disabledHosts.includes(currentSiteHost);
+  siteToggle.textContent=paused?"恢复来源网站自动查词":"暂停来源网站自动查词";
+  siteStatus.textContent=`来源网站 ${currentSiteHost} · ${paused?"自动查词已暂停":"自动查词可用"}。站点暂停不影响手动查询。`;
+}
+
+async function applyOptionsSource(value:unknown):Promise<void>{
+  sourceTabId=null;
+  sourceTabUrl="";
+  sourceTabTitle="";
+  if(isOptionsSourceTab(value)&&Date.now()-value.capturedAt<=SOURCE_MAX_AGE_MS){
+    try{
+      const tab=await chrome.tabs.get(value.tabId);
+      if(typeof tab.id==="number"){
+        sourceTabId=tab.id;
+        sourceTabUrl=tab.url??value.url;
+        sourceTabTitle=tab.title??value.title;
+      }
+    }catch{
+      // The source tab may have been closed while the settings page stayed open.
+    }
+  }
+  currentSiteHost=siteHost(sourceTabUrl);
+  openPdf.textContent=/^https?:/i.test(sourceTabUrl)&&/\\.pdf(?:$|[?#])/i.test(sourceTabUrl)
+    ?"用查词阅读器打开来源 PDF"
+    :"打开 PDF 阅读器";
+  renderSiteControls();
+}
+
+async function loadOptionsSource():Promise<void>{
+  const stored=await chrome.storage.session.get(OPTIONS_SOURCE_STORAGE_KEY);
+  await applyOptionsSource(stored[OPTIONS_SOURCE_STORAGE_KEY]);
 }
 
 function providerFormConfig(id:ProviderId){
@@ -145,6 +215,22 @@ function renderPronunciationSettings():void{
 function renderSpeechExplanationSettings():void{
   speechExplanationDetails.classList.toggle("hidden",!autoSpeechExplanation.checked);
   renderPronunciationSettings();
+}
+
+function renderSpeechModelSettings(resetModel=false):void{
+  const selected=speechModelProvider.value as SpeechModelProviderId;
+  if(selected==="main"){
+    speechModel.disabled=true;
+    speechModelSuggestions.replaceChildren();
+    speechModel.value=model.value.trim()||working.api.model;
+    return;
+  }
+  speechModel.disabled=false;
+  const preset=PROVIDER_PRESETS[selected];
+  speechModelSuggestions.replaceChildren(...preset.modelSuggestions.map(value=>{
+    const option=document.createElement("option");option.value=value;return option;
+  }));
+  if(resetModel||!speechModel.value.trim()) speechModel.value=providerFormConfig(selected).model||preset.defaultModel;
 }
 
 function setTestStatus(element:HTMLSpanElement,state:"idle"|"testing"|"success"|"error",message:string):void{
@@ -263,6 +349,8 @@ async function loadForm():Promise<void>{
   ]);
   working=loaded;
   autoLookup.checked=stored[AUTO_LOOKUP_STORAGE_KEY]!==false;
+  lookupMode.value=working.behavior.mode;
+  skipEditable.checked=working.behavior.skipEditable;
   provider.value=working.api.provider;
   activeProvider=working.api.provider;
   loadProviderForm(activeProvider);
@@ -282,14 +370,14 @@ async function loadForm():Promise<void>{
   autoSpeechExplanation.checked=working.speechExplanation.enabled;
   stopSpeechOnCardClose.checked=working.speechExplanation.stopOnCardClose;
   speechPlaybackRate.value=String(working.speechExplanation.playbackRate);
+  speechModelProvider.value=working.speechExplanation.modelProvider;
+  speechModel.value=working.speechExplanation.model;
   speechExplanationPrompt.value=working.speechExplanation.prompt;
   speechTtsStyle.value=working.speechExplanation.ttsStyle;
   editingPromptId=working.prompts.items[0]?.id??"";
-  const tabs=await chrome.tabs.query({active:true,currentWindow:true});
-  if(tabs[0]?.url&&/\\.pdf(?:$|[?#])/i.test(tabs[0].url)){
-    openPdf.textContent="用查词阅读器打开当前 PDF";
-  }
+  await loadOptionsSource();
   renderSpeechExplanationSettings();
+  renderSpeechModelSettings();
   renderProviderDetails();
   renderPromptEditor();
   applyPopupTheme(working.ui.theme);
@@ -300,10 +388,34 @@ provider.addEventListener("change",()=>{
   activeProvider=selectedProvider();
   loadProviderForm(activeProvider);
   renderProviderDetails();
+  if(speechModelProvider.value==="main") renderSpeechModelSettings();
 });
 theme.addEventListener("change",()=>applyPopupTheme(theme.value as UiTheme));
 pronunciationProvider.addEventListener("change",renderPronunciationSettings);
 autoSpeechExplanation.addEventListener("change",renderSpeechExplanationSettings);
+speechModelProvider.addEventListener("change",()=>renderSpeechModelSettings(true));
+manualLookupNow.addEventListener("click",()=>{
+  void (async()=>{
+    if(sourceTabId===null) throw new Error("没有可用的来源页面，请回到网页后点击扩展图标重新打开设置。");
+    await chrome.tabs.sendMessage(sourceTabId,{type:"MANUAL_LOOKUP_TRIGGER"});
+    status.textContent="已向来源页面发送手动查词指令。";
+  })().catch(error=>{status.textContent=error instanceof Error?error.message:"手动查词失败。";});
+});
+siteToggle.addEventListener("click",()=>{
+  void (async()=>{
+    if(!currentSiteHost) return;
+    const persisted=await loadLookupSettings();
+    const paused=persisted.behavior.disabledHosts.includes(currentSiteHost);
+    persisted.behavior.disabledHosts=paused
+      ?persisted.behavior.disabledHosts.filter(host=>host!==currentSiteHost)
+      :[...persisted.behavior.disabledHosts,currentSiteHost];
+    const normalized=normalizeSettings(persisted);
+    await chrome.storage.local.set({[SETTINGS_STORAGE_KEY]:normalized});
+    working.behavior.disabledHosts=[...normalized.behavior.disabledHosts];
+    renderSiteControls();
+    status.textContent=paused?"已恢复当前网站自动查词。":"已暂停当前网站自动查词。";
+  })().catch(error=>{status.textContent=error instanceof Error?error.message:"更新网站设置失败。";});
+});
 
 testApi.addEventListener("click",()=>{
   void (async()=>{
@@ -432,9 +544,7 @@ openHistory.addEventListener("click",()=>{
 });
 openPdf.addEventListener("click",()=>{
   void (async()=>{
-    const tabs=await chrome.tabs.query({active:true,currentWindow:true});
-    const current=tabs[0]?.url;
-    const source=current&&/^https?:/i.test(current)&&/\\.pdf(?:$|[?#])/i.test(current)?current:"";
+    const source=/^https?:/i.test(sourceTabUrl)&&/\\.pdf(?:$|[?#])/i.test(sourceTabUrl)?sourceTabUrl:"";
     const url=chrome.runtime.getURL("pdf.html")+(source?"?src="+encodeURIComponent(source):"");
     await chrome.tabs.create({url});
   })();
@@ -443,6 +553,7 @@ save.addEventListener("click",()=>{
   void (async()=>{
     savePromptEditor();
     working.ui={theme:theme.value as UiTheme,fontSize:fontSize.value as UiFontSize};
+    working.behavior={mode:lookupMode.value as LookupTriggerMode,disabledHosts:[...working.behavior.disabledHosts],skipEditable:skipEditable.checked};
     const selectedApiProvider=selectedProvider();
     stashProviderForm(selectedApiProvider);
     const providerConfigs=working.api.providerConfigs??{};
@@ -481,6 +592,8 @@ save.addEventListener("click",()=>{
       enabled:autoSpeechExplanation.checked,
       stopOnCardClose:stopSpeechOnCardClose.checked,
       playbackRate:Number(speechPlaybackRate.value)||DEFAULT_SETTINGS.speechExplanation.playbackRate,
+      modelProvider:speechModelProvider.value as SpeechModelProviderId,
+      model:speechModelProvider.value==="main"?"":speechModel.value.trim(),
       prompt:speechExplanationPrompt.value.trim()||DEFAULT_SETTINGS.speechExplanation.prompt,
       ttsStyle:speechTtsStyle.value.trim()||DEFAULT_SETTINGS.speechExplanation.ttsStyle
     };
@@ -501,6 +614,11 @@ save.addEventListener("click",()=>{
   })().catch(error=>{
     status.textContent=error instanceof Error?error.message:"保存失败";
   });
+});
+
+chrome.storage.onChanged.addListener((changes,areaName)=>{
+  if(areaName!=="session"||!changes[OPTIONS_SOURCE_STORAGE_KEY]) return;
+  void applyOptionsSource(changes[OPTIONS_SOURCE_STORAGE_KEY].newValue);
 });
 
 void loadForm();

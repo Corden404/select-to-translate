@@ -10,6 +10,9 @@ export interface HistoryRetentionPolicy {
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
+let lastPruneAt = 0;
+let prunePromise: Promise<void> | null = null;
+const PRUNE_INTERVAL_MS = 60_000;
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -58,10 +61,22 @@ export async function putHistoryRecord(
   retention?: HistoryRetentionPolicy
 ): Promise<void> {
   await withStore("readwrite", store => store.put(record));
-  if (retention) await pruneHistory(retention);
+  if (retention) scheduleHistoryPrune(retention);
+}
+
+export function scheduleHistoryPrune(retention: HistoryRetentionPolicy): void {
+  const now = Date.now();
+  if (prunePromise || now - lastPruneAt < PRUNE_INTERVAL_MS) return;
+  lastPruneAt = now;
+  prunePromise = pruneHistory(retention)
+    .catch(() => undefined)
+    .finally(() => {
+      prunePromise = null;
+    });
 }
 
 export async function pruneHistory(retention: HistoryRetentionPolicy): Promise<void> {
+  lastPruneAt = Date.now();
   const db = await openDb();
   const tx = db.transaction(STORE_NAME, "readwrite");
   const index = tx.objectStore(STORE_NAME).index("createdAt");

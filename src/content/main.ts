@@ -137,17 +137,42 @@ function pointerMatchesSelection(event: Event, selection: Selection): boolean {
     || Boolean(endElement?.contains(target));
 }
 
+function currentSourceHostname(): string {
+  const rawUrl = document.documentElement.dataset.lookupSourceUrl || location.href;
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.hostname.toLowerCase() : "";
+  } catch {
+    return "";
+  }
+}
+
+function autoLookupAllowedOnPage(): boolean {
+  if (settings.behavior.mode !== "auto") return false;
+  const host = currentSourceHostname();
+  return !host || !settings.behavior.disabledHosts.includes(host);
+}
+
+function eventTargetsEditable(event: Event): boolean {
+  if (!settings.behavior.skipEditable) return false;
+  return event.composedPath().some(target => {
+    if (!(target instanceof Element)) return false;
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return true;
+    return target instanceof HTMLElement && target.isContentEditable;
+  });
+}
+
 function scheduleLookup(event?: Event): void {
-  if (!enabled) return;
+  if (!enabled || !autoLookupAllowedOnPage()) return;
   if (event && !event.isTrusted) return;
-  if (event && card.containsEvent(event)) return;
+  if (event && (card.containsEvent(event) || eventTargetsEditable(event))) return;
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
   if (event && !pointerMatchesSelection(event, selection)) return;
   scheduledTriggeredAt = Date.now();
   scheduledSelectionText = selection.toString();
   if (scheduled !== null) window.clearTimeout(scheduled);
-  scheduled = window.setTimeout(runLookup, 70);
+  scheduled = window.setTimeout(() => runLookup(), 70);
 }
 
 function getSourceMetadata(): {
@@ -163,14 +188,14 @@ function getSourceMetadata(): {
   };
 }
 
-function runLookup(): void {
-  const triggeredAt = scheduledTriggeredAt || Date.now();
+function runLookup(triggeredAtOverride?: number, force = false): void {
+  const triggeredAt = triggeredAtOverride ?? (scheduledTriggeredAt || Date.now());
   const expectedSelectionText = scheduledSelectionText;
   scheduledTriggeredAt = 0;
   scheduledSelectionText = "";
   scheduled = null;
   if (!enabled) return;
-  if (performance.now() < suppressLookupUntil) return;
+  if (!force && performance.now() < suppressLookupUntil) return;
 
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
@@ -184,7 +209,7 @@ function runLookup(): void {
   if (!anchor) return;
 
   const nextFingerprint = fingerprint(classified.text, anchor.top, anchor.left);
-  if (nextFingerprint === lastFingerprint) return;
+  if (!force && nextFingerprint === lastFingerprint) return;
   lastFingerprint = nextFingerprint;
 
   cancelActiveRequest();
@@ -287,6 +312,18 @@ function sendFollowUp(message: string): boolean {
   return true;
 }
 
+function triggerManualLookup(): void {
+  if (!enabled) return;
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
+  if (scheduled !== null) window.clearTimeout(scheduled);
+  scheduled = null;
+  scheduledSelectionText = selection.toString();
+  scheduledTriggeredAt = Date.now();
+  lastFingerprint = "";
+  runLookup(scheduledTriggeredAt, true);
+}
+
 async function getPronunciation(word: string): Promise<PronunciationResponse> {
   const key = word.trim().toLowerCase();
   const cached = pronunciationCache.get(key);
@@ -334,9 +371,14 @@ document.addEventListener("keyup", event => {
 }, true);
 
 window.addEventListener("resize", () => card.reposition());
-window.addEventListener("scroll", () => card.reposition(), true);
+window.addEventListener("scroll", event => card.handleDocumentScroll(event), true);
 
 chrome.runtime.onMessage.addListener((message: unknown) => {
+  if (message && typeof message === "object"
+    && (message as { type?: unknown }).type === "MANUAL_LOOKUP_TRIGGER") {
+    triggerManualLookup();
+    return;
+  }
   if (!isPublicSettingsChangedMessage(message)) return;
   enabled = message.enabled;
   settings = message.settings;

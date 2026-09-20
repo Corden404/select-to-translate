@@ -40,7 +40,7 @@ MiMo 官方文档提供 OpenAI-compatible Chat Completions。查词场景默认�
 
 本项目的手动单词发音使用非流式 WAV，因为单词/短词组很短，可以直接交给浏览器 `Audio` 播放。默认 `Mia`，并用 `user` 风格指令要求清晰自然的 British English dictionary-style pronunciation。官方没有声明这四个英文 voice ID 各自是英音还是美音，因此不把 `Mia` 描述成“官方英音音色”。
 
-手动单词发音只在用户点击发音按钮时调用 TTS。若用户开启“自动语音解释”，每次符合条件的单词/短词组查词会额外生成一段英文语音稿，并以 `pcm16` / 24kHz 流式调用 MiMo TTS，以降低首音延迟。若主模型平台为 MiMo，TTS Key 留空可复用主 API Key；否则可单独配置 MiMo TTS Key。公网 MiMo Base URL 必须使用 HTTPS，本机回环地址可使用 HTTP 便于开发。
+手动单词发音只在用户点击发音按钮时调用 TTS。若用户开启“自动语音解释”，英文口语稿默认由主查词模型生成，也可以单独选择任一已配置的 OpenAI-compatible Provider / Model，以便优化延迟或成本；口语稿完成后再以 `pcm16` / 24kHz 流式调用 MiMo TTS。若主模型平台为 MiMo，TTS Key 留空可复用主 API Key；否则可单独配置 MiMo TTS Key。公网 MiMo Base URL 必须使用 HTTPS，本机回环地址可使用 HTTP 便于开发。
 
 ## 阿里云千问
 

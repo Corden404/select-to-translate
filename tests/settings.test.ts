@@ -6,6 +6,7 @@ import {
   DEFAULT_WORD_PROMPT_ID,
   normalizeSettings,
   resolvePrompt,
+  resolveSpeechExplanationApi,
   toPublicLookupSettings
 } from "../src/shared/settings";
 
@@ -36,6 +37,8 @@ describe("settings migration and prompt routing", () => {
     expect(settings.speechExplanation.enabled).toBe(false);
     expect(settings.speechExplanation.stopOnCardClose).toBe(true);
     expect(settings.speechExplanation.playbackRate).toBe(1);
+    expect(settings.speechExplanation.modelProvider).toBe("main");
+    expect(settings.speechExplanation.model).toBe("");
     expect(settings.speechExplanation.prompt).toBe(DEFAULT_SPEECH_EXPLANATION_PROMPT);
     expect(settings.speechExplanation.prompt).toContain("Respond entirely in English");
     expect(settings.speechExplanation.prompt).toContain("common, everyday English words");
@@ -191,6 +194,50 @@ Requirements:
 
     const invalid = normalizeSettings({ history: { enabled: true, retentionDays: -1, maxEntries: 10 } });
     expect(invalid.history).toEqual(defaults.history);
+  });
+
+  it("normalizes trigger behavior and site pauses", () => {
+    const defaults = normalizeSettings({});
+    expect(defaults.behavior).toEqual({ mode: "auto", disabledHosts: [], skipEditable: true });
+
+    const custom = normalizeSettings({
+      behavior: {
+        mode: "manual",
+        disabledHosts: ["Example.COM", "example.com", "bad host", "docs.example.com"],
+        skipEditable: false
+      }
+    });
+    expect(custom.behavior).toEqual({
+      mode: "manual",
+      disabledHosts: ["example.com", "docs.example.com"],
+      skipEditable: false
+    });
+  });
+
+  it("resolves an independent speech explanation model without exposing its credentials publicly", () => {
+    const settings = normalizeSettings({
+      api: {
+        provider: "deepseek",
+        providerConfigs: {
+          deepseek: { apiKey: "main-key", baseUrl: "https://api.deepseek.com", model: "deepseek-flash" },
+          qwen: { apiKey: "speech-key", baseUrl: "https://speech.example/v1", model: "qwen-fast" }
+        }
+      },
+      speechExplanation: {
+        modelProvider: "qwen",
+        model: "qwen-turbo-speech"
+      }
+    });
+
+    expect(resolveSpeechExplanationApi(settings)).toEqual({
+      provider: "qwen",
+      baseUrl: "https://speech.example/v1",
+      apiKey: "speech-key",
+      model: "qwen-turbo-speech",
+      timeoutMs: settings.api.timeoutMs
+    });
+    expect(JSON.stringify(toPublicLookupSettings(settings))).not.toContain("speech-key");
+    expect(JSON.stringify(toPublicLookupSettings(settings))).not.toContain("qwen-turbo-speech");
   });
 
   it("routes explicit prompts and keeps defaults", () => {

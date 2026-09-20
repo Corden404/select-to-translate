@@ -15,6 +15,8 @@ let documentProxy:PDFDocumentProxy|null=null;
 let scale=1.25;
 let renderGeneration=0;
 let pageObserver:IntersectionObserver|null=null;
+let estimatedPageWidth=0;
+let estimatedPageHeight=0;
 
 interface PageSlot{
   number:number;
@@ -25,6 +27,11 @@ interface PageSlot{
 }
 
 const pageSlots=new Map<number,PageSlot>();
+
+interface ReadingPosition{
+  pageNumber:number;
+  ratio:number;
+}
 
 function setSource(url:string,title:string):void{
   document.documentElement.dataset.lookupSourceType="pdf";
@@ -39,6 +46,12 @@ function clearPage(slot:PageSlot):void{
   slot.rendered=false;
 }
 
+function applySlotSize(slot:PageSlot,width:number,height:number,viewportScale:number):void{
+  slot.container.style.width=width+"px";
+  slot.container.style.height=height+"px";
+  slot.container.style.setProperty("--total-scale-factor",String(viewportScale));
+}
+
 async function renderPage(pdf:PDFDocumentProxy,slot:PageSlot,generation:number):Promise<void>{
   if(slot.rendered||slot.rendering||generation!==renderGeneration) return;
   slot.rendering=true;
@@ -46,6 +59,7 @@ async function renderPage(pdf:PDFDocumentProxy,slot:PageSlot,generation:number):
     const page=await pdf.getPage(slot.number);
     if(generation!==renderGeneration) return;
     const viewport=page.getViewport({scale});
+    applySlotSize(slot,viewport.width,viewport.height,viewport.scale);
     const canvas=document.createElement("canvas");
     const outputScale=Math.min(window.devicePixelRatio||1,2);
     canvas.width=Math.floor(viewport.width*outputScale);
@@ -79,10 +93,20 @@ async function renderPage(pdf:PDFDocumentProxy,slot:PageSlot,generation:number):
   }
 }
 
+function samplePageNumbers(total:number):number[]{
+  if(total<=0) return [];
+  return [...new Set([
+    1,
+    Math.max(1,Math.round(total*0.25)),
+    Math.max(1,Math.round(total*0.5)),
+    Math.max(1,Math.round(total*0.75)),
+    total
+  ])];
+}
+
 async function sampleTextCharacters(pdf:PDFDocumentProxy):Promise<number>{
-  const count=Math.min(pdf.numPages,5);
   let characters=0;
-  for(let number=1;number<=count;number++){
+  for(const number of samplePageNumbers(pdf.numPages)){
     const page=await pdf.getPage(number);
     const textContent=await page.getTextContent();
     characters+=textContent.items.reduce((sum,item)=>sum+("str" in item?item.str.length:0),0);
@@ -91,7 +115,48 @@ async function sampleTextCharacters(pdf:PDFDocumentProxy):Promise<number>{
   return characters;
 }
 
-async function preparePdf(pdf:PDFDocumentProxy):Promise<void>{
+function captureReadingPosition():ReadingPosition|null{
+  if(pageSlots.size===0) return null;
+  const viewportCenter=window.innerHeight/2;
+  let best:PageSlot|null=null;
+  let bestDistance=Number.POSITIVE_INFINITY;
+  for(const slot of pageSlots.values()){
+    const rect=slot.container.getBoundingClientRect();
+    const distance=Math.abs(rect.top+rect.height/2-viewportCenter);
+    if(distance<bestDistance){
+      best=slot;
+      bestDistance=distance;
+    }
+  }
+  if(!best) return null;
+  const rect=best.container.getBoundingClientRect();
+  const ratio=rect.height>0
+    ? Math.min(1,Math.max(0,(viewportCenter-rect.top)/rect.height))
+    : 0;
+  return {pageNumber:best.number,ratio};
+}
+
+function restoreReadingPosition(position:ReadingPosition|null):void{
+  if(!position) return;
+  const slot=pageSlots.get(position.pageNumber);
+  if(!slot) return;
+  const top=slot.container.offsetTop+slot.container.offsetHeight*position.ratio-window.innerHeight/2;
+  window.scrollTo({top:Math.max(0,top)});
+}
+
+async function updateTextAvailabilityStatus(pdf:PDFDocumentProxy,generation:number):Promise<void>{
+  try{
+    const textCharacters=await sampleTextCharacters(pdf);
+    if(generation!==renderGeneration) return;
+    status.textContent=textCharacters<10
+      ?"PDF 已加载；抽样页面未检测到可选择文本。部分页面仍可能有文本，扫描内容暂不支持 OCR。"
+      :"已加载 "+pdf.numPages+" 页（按需渲染）。选中英文单词或句子即可查词。";
+  }catch(error){
+    if(generation===renderGeneration) showError(error);
+  }
+}
+
+async function preparePdf(pdf:PDFDocumentProxy,position:ReadingPosition|null=null):Promise<void>{
   const generation=++renderGeneration;
   pageObserver?.disconnect();
   pageObserver=null;
@@ -99,17 +164,18 @@ async function preparePdf(pdf:PDFDocumentProxy):Promise<void>{
   pages.replaceChildren();
   status.textContent="正在准备 "+pdf.numPages+" 页…";
 
+  const firstPage=await pdf.getPage(1);
+  if(generation!==renderGeneration) return;
+  const estimatedViewport=firstPage.getViewport({scale});
+  estimatedPageWidth=estimatedViewport.width;
+  estimatedPageHeight=estimatedViewport.height;
+
   for(let number=1;number<=pdf.numPages;number++){
-    const page=await pdf.getPage(number);
-    if(generation!==renderGeneration) return;
-    const viewport=page.getViewport({scale});
     const container=document.createElement("section");
     container.className="page";
     container.dataset.pageNumber=String(number);
-    container.style.width=viewport.width+"px";
-    container.style.height=viewport.height+"px";
-    container.style.setProperty("--total-scale-factor",String(viewport.scale));
     const slot:PageSlot={number,container,visible:false,rendered:false,rendering:false};
+    applySlotSize(slot,estimatedPageWidth,estimatedPageHeight,estimatedViewport.scale);
     pageSlots.set(number,slot);
     pages.append(container);
   }
@@ -129,16 +195,18 @@ async function preparePdf(pdf:PDFDocumentProxy):Promise<void>{
   },{rootMargin:"1200px 0px"});
   for(const slot of pageSlots.values()) pageObserver.observe(slot.container);
 
-  const first=pageSlots.get(1);
-  if(first){
-    first.visible=true;
-    await renderPage(pdf,first,generation);
+  if(position){
+    restoreReadingPosition(position);
+  }else{
+    const first=pageSlots.get(1);
+    if(first){
+      first.visible=true;
+      await renderPage(pdf,first,generation);
+    }
   }
   if(generation!==renderGeneration) return;
-  const textCharacters=await sampleTextCharacters(pdf);
-  status.textContent=textCharacters<10
-    ?"PDF 已加载，但采样页面没有检测到可选择的文本层。扫描型 PDF 暂不支持 OCR。"
-    :"已加载 "+pdf.numPages+" 页（按需渲染）。选中英文单词或句子即可查词。";
+  status.textContent="已加载 "+pdf.numPages+" 页（按需渲染）。正在抽样检测文本层…";
+  void updateTextAvailabilityStatus(pdf,generation);
 }
 
 async function replaceDocument(next:PDFDocumentProxy):Promise<void>{
@@ -166,7 +234,9 @@ async function openLocal(file:File):Promise<void>{
 }
 
 async function rerender():Promise<void>{
-  if(documentProxy) await preparePdf(documentProxy);
+  if(!documentProxy) return;
+  const position=captureReadingPosition();
+  await preparePdf(documentProxy,position);
 }
 
 loadButton.addEventListener("click",()=>void openRemote(urlInput.value).catch(showError));

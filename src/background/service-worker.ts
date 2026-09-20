@@ -28,8 +28,10 @@ import {
   DEFAULT_SETTINGS,
   SETTINGS_STORAGE_KEY,
   loadLookupSettings,
+  resolveSpeechExplanationApi,
   toPublicLookupSettings
 } from "../shared/settings";
+import { OPTIONS_SOURCE_STORAGE_KEY } from "../shared/options-source";
 
 interface SpeechSession {
   requestId: string;
@@ -48,6 +50,7 @@ let latestSpeechLookupRequestId = "";
 let replayableSpeech: ReplayableSpeech | null = null;
 const cancelledSpeechRequestIds = new Set<string>();
 const lookupStartsBySource = new Map<string, number[]>();
+const MANUAL_LOOKUP_MENU_ID = "manual-lookup-selection";
 
 function allowLookupBurst(sourceKey: string): boolean {
   const now = Date.now();
@@ -144,12 +147,13 @@ async function startSpeechExplanation(
   let llmFirstTokenAt: number | null = null;
   let script = "";
   try {
+    const speechApi = resolveSpeechExplanationApi(settings);
     await streamOpenAiCompatible(
       {
-        baseUrl: settings.api.baseUrl,
-        apiKey: settings.api.apiKey,
-        model: settings.api.model,
-        timeoutMs: settings.api.timeoutMs,
+        baseUrl: speechApi.baseUrl,
+        apiKey: speechApi.apiKey,
+        model: speechApi.model,
+        timeoutMs: speechApi.timeoutMs,
         messages: buildSpeechExplanationMessages(settings, payload)
       },
       session.scriptController.signal,
@@ -324,7 +328,29 @@ async function broadcastPublicState(): Promise<void> {
 async function updateBadge(enabled: boolean): Promise<void> {
   await chrome.action.setBadgeText({ text: enabled ? "开" : "关" });
   await chrome.action.setTitle({
-    title: enabled ? "右键查词工具：自动查词已开启" : "右键查词工具：自动查词已关闭"
+    title: enabled ? "打开右键查词工具设置 · 查词已开启" : "打开右键查词工具设置 · 查词已关闭"
+  });
+}
+
+async function sendManualLookup(tabId: number, frameId?: number): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(
+      tabId,
+      { type: "MANUAL_LOOKUP_TRIGGER" },
+      typeof frameId === "number" ? { frameId } : undefined
+    );
+  } catch {
+    // Pages without a compatible content script are expected.
+  }
+}
+
+function installContextMenu(): void {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: MANUAL_LOOKUP_MENU_ID,
+      title: "使用右键查词工具查询选中文字",
+      contexts: ["selection"]
+    });
   });
 }
 
@@ -336,6 +362,31 @@ async function setEnabled(enabled: boolean): Promise<void> {
 async function toggleEnabled(): Promise<void> {
   await setEnabled(!(await getEnabled()));
 }
+
+async function openOptionsFromTab(tab: chrome.tabs.Tab): Promise<void> {
+  try {
+    if (typeof tab.id === "number") {
+      await chrome.storage.session.set({
+        [OPTIONS_SOURCE_STORAGE_KEY]: {
+          tabId: tab.id,
+          windowId: tab.windowId,
+          url: tab.url ?? "",
+          title: tab.title ?? "",
+          capturedAt: Date.now()
+        }
+      });
+    } else {
+      await chrome.storage.session.remove(OPTIONS_SOURCE_STORAGE_KEY);
+    }
+  } catch (error) {
+    console.warn("无法记录设置页来源标签：", error);
+  }
+  await chrome.runtime.openOptionsPage();
+}
+
+chrome.action.onClicked.addListener(tab => {
+  void openOptionsFromTab(tab);
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   void (async () => {
@@ -355,6 +406,7 @@ chrome.runtime.onInstalled.addListener(() => {
       await chrome.storage.local.set(updates);
     }
     await updateBadge(await getEnabled());
+    installContextMenu();
   })();
 });
 
@@ -362,11 +414,23 @@ chrome.runtime.onStartup.addListener(() => {
   void (async () => {
     await restrictLocalStorageAccess();
     await updateBadge(await getEnabled());
+    installContextMenu();
   })();
 });
 
-chrome.commands.onCommand.addListener(command => {
-  if (command === "toggle-auto-lookup") void toggleEnabled();
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command === "toggle-auto-lookup") {
+    void toggleEnabled();
+    return;
+  }
+  if (command === "lookup-selection" && typeof tab?.id === "number") {
+    void sendManualLookup(tab.id);
+  }
+});
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId !== MANUAL_LOOKUP_MENU_ID || typeof tab?.id !== "number") return;
+  void sendManualLookup(tab.id, info.frameId);
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -510,6 +574,7 @@ chrome.runtime.onConnect.addListener(port => {
         streamConversation.push({ role: "assistant", content: assistant });
         record.messages = [...streamConversation];
       }
+      if (mode === "lookup" && assistant) record.initialResponse = assistant;
       await saveRecord(record);
       safePost(mode === "lookup" ? {
         type: "LOOKUP_ERROR",

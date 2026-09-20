@@ -6,6 +6,8 @@ export const SETTINGS_STORAGE_KEY = "lookupSettings";
 export type ProviderId = "deepseek" | "zhipu" | "mimo" | "qwen" | "custom";
 export type UiTheme = "dark" | "light" | "system";
 export type UiFontSize = "small" | "medium" | "large";
+export type LookupTriggerMode = "auto" | "manual";
+export type SpeechModelProviderId = ProviderId | "main";
 export type PromptApplicableType = SelectionKind | "both";
 
 export interface ProviderPreset {
@@ -59,6 +61,11 @@ export interface LookupSettings {
     theme: UiTheme;
     fontSize: UiFontSize;
   };
+  behavior: {
+    mode: LookupTriggerMode;
+    disabledHosts: string[];
+    skipEditable: boolean;
+  };
   api: {
     provider: ProviderId;
     baseUrl: string;
@@ -78,6 +85,8 @@ export interface LookupSettings {
     enabled: boolean;
     stopOnCardClose: boolean;
     playbackRate: number;
+    modelProvider: SpeechModelProviderId;
+    model: string;
     prompt: string;
     ttsStyle: string;
   };
@@ -95,6 +104,7 @@ export interface LookupSettings {
 
 export interface PublicLookupSettings {
   ui: LookupSettings["ui"];
+  behavior: LookupSettings["behavior"];
   pronunciation: {
     provider: PronunciationProviderId;
     mimo: {
@@ -258,6 +268,11 @@ export const DEFAULT_SETTINGS: LookupSettings = {
     theme: "dark",
     fontSize: "medium"
   },
+  behavior: {
+    mode: "auto",
+    disabledHosts: [],
+    skipEditable: true
+  },
   api: {
     provider: "deepseek",
     baseUrl: PROVIDER_PRESETS.deepseek.baseUrl,
@@ -298,6 +313,8 @@ export const DEFAULT_SETTINGS: LookupSettings = {
     enabled: false,
     stopOnCardClose: true,
     playbackRate: 1,
+    modelProvider: "main",
+    model: "",
     prompt: DEFAULT_SPEECH_EXPLANATION_PROMPT,
     ttsStyle: DEFAULT_SPEECH_TTS_STYLE
   },
@@ -316,6 +333,11 @@ export const DEFAULT_SETTINGS: LookupSettings = {
 export function toPublicLookupSettings(settings: LookupSettings): PublicLookupSettings {
   return {
     ui: { ...settings.ui },
+    behavior: {
+      mode: settings.behavior.mode,
+      disabledHosts: [...settings.behavior.disabledHosts],
+      skipEditable: settings.behavior.skipEditable
+    },
     pronunciation: {
       provider: settings.pronunciation.provider,
       mimo: {
@@ -368,6 +390,23 @@ function isTheme(value: unknown): value is UiTheme {
 
 function isFontSize(value: unknown): value is UiFontSize {
   return value === "small" || value === "medium" || value === "large";
+}
+
+function isLookupTriggerMode(value: unknown): value is LookupTriggerMode {
+  return value === "auto" || value === "manual";
+}
+
+function isSpeechModelProviderId(value: unknown): value is SpeechModelProviderId {
+  return value === "main" || isProviderId(value);
+}
+
+function normalizeDisabledHosts(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const hosts = value
+    .filter((item): item is string => typeof item === "string")
+    .map(item => item.trim().toLowerCase())
+    .filter(item => item.length > 0 && item.length <= 253 && /^[a-z0-9.-]+$/.test(item));
+  return [...new Set(hosts)].slice(0, 200);
 }
 
 function isApplicableType(value: unknown): value is PromptApplicableType {
@@ -475,6 +514,9 @@ function migrateLegacyPrompts(raw: unknown): LookupSettings["prompts"] {
 export function normalizeSettings(raw: unknown): LookupSettings {
   const value = (raw && typeof raw === "object" ? raw : {}) as Partial<LookupSettings>;
   const rawUi = (value.ui && typeof value.ui === "object" ? value.ui : {}) as Partial<LookupSettings["ui"]>;
+  const rawBehavior = (value.behavior && typeof value.behavior === "object"
+    ? value.behavior
+    : {}) as Partial<LookupSettings["behavior"]>;
   const rawApi = (value.api && typeof value.api === "object" ? value.api : {}) as Partial<LookupSettings["api"]>;
   const rawPronunciation = (value.pronunciation && typeof value.pronunciation === "object"
     ? value.pronunciation
@@ -550,6 +592,13 @@ export function normalizeSettings(raw: unknown): LookupSettings {
       theme: isTheme(rawUi.theme) ? rawUi.theme : DEFAULT_SETTINGS.ui.theme,
       fontSize: isFontSize(rawUi.fontSize) ? rawUi.fontSize : DEFAULT_SETTINGS.ui.fontSize
     },
+    behavior: {
+      mode: isLookupTriggerMode(rawBehavior.mode) ? rawBehavior.mode : DEFAULT_SETTINGS.behavior.mode,
+      disabledHosts: normalizeDisabledHosts(rawBehavior.disabledHosts),
+      skipEditable: typeof rawBehavior.skipEditable === "boolean"
+        ? rawBehavior.skipEditable
+        : DEFAULT_SETTINGS.behavior.skipEditable
+    },
     api: {
       provider,
       baseUrl: activeProviderConfig.baseUrl,
@@ -591,6 +640,12 @@ export function normalizeSettings(raw: unknown): LookupSettings {
       stopOnCardClose: typeof rawSpeechExplanation.stopOnCardClose === "boolean"
         ? rawSpeechExplanation.stopOnCardClose
         : DEFAULT_SETTINGS.speechExplanation.stopOnCardClose,
+      modelProvider: isSpeechModelProviderId(rawSpeechExplanation.modelProvider)
+        ? rawSpeechExplanation.modelProvider
+        : DEFAULT_SETTINGS.speechExplanation.modelProvider,
+      model: typeof rawSpeechExplanation.model === "string"
+        ? rawSpeechExplanation.model.trim().slice(0, 300)
+        : DEFAULT_SETTINGS.speechExplanation.model,
       playbackRate: rawPlaybackRate === 1.15 && usesLegacyDefaultSpeechPrompt
         ? DEFAULT_SETTINGS.speechExplanation.playbackRate
         : [1, 1.1, 1.15, 1.25, 1.5].includes(rawPlaybackRate)
@@ -623,6 +678,35 @@ export function normalizeSettings(raw: unknown): LookupSettings {
         : DEFAULT_SETTINGS.history.maxEntries
     },
     prompts: migrateLegacyPrompts((value as unknown as { prompts?: unknown }).prompts)
+  };
+}
+
+export function resolveSpeechExplanationApi(settings: LookupSettings): {
+  provider: ProviderId;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  timeoutMs: number;
+} {
+  if (settings.speechExplanation.modelProvider === "main") {
+    return {
+      provider: settings.api.provider,
+      baseUrl: settings.api.baseUrl,
+      apiKey: settings.api.apiKey,
+      model: settings.api.model,
+      timeoutMs: settings.api.timeoutMs
+    };
+  }
+
+  const provider = settings.speechExplanation.modelProvider;
+  const config = settings.api.providerConfigs?.[provider];
+  const preset = PROVIDER_PRESETS[provider];
+  return {
+    provider,
+    baseUrl: config?.baseUrl || preset.baseUrl,
+    apiKey: config?.apiKey || "",
+    model: settings.speechExplanation.model || config?.model || preset.defaultModel,
+    timeoutMs: settings.api.timeoutMs
   };
 }
 
