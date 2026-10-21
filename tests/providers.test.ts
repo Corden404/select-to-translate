@@ -15,6 +15,15 @@ describe("OpenAI-compatible provider config", () => {
       .toBe("https://api.xiaomimimo.com/v1/chat/completions");
   });
 
+  it("keeps the query and drops the fragment when appending the path", () => {
+    expect(buildChatCompletionsUrl("https://api.example.com/v1?key=abc"))
+      .toBe("https://api.example.com/v1/chat/completions?key=abc");
+    expect(buildChatCompletionsUrl("https://api.example.com/v1#frag"))
+      .toBe("https://api.example.com/v1/chat/completions");
+    expect(buildChatCompletionsUrl("https://api.example.com/v1?key=abc#frag"))
+      .toBe("https://api.example.com/v1/chat/completions?key=abc");
+  });
+
   it("requires HTTPS except for loopback development endpoints", () => {
     expect(buildChatCompletionsUrl("http://127.0.0.1:8080/v1"))
       .toBe("http://127.0.0.1:8080/v1/chat/completions");

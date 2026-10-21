@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildChatCompletionsUrl,
   getMiMoExplanationSpeech,
   getMiMoPronunciation,
   streamMiMoExplanationSpeech
 } from "../src/pronunciation/mimo";
 
 describe("MiMo TTS pronunciation provider", () => {
+  it("keeps the query and drops the fragment when appending the path", () => {
+    expect(buildChatCompletionsUrl("https://api.xiaomimimo.com/v1?key=abc"))
+      .toBe("https://api.xiaomimimo.com/v1/chat/completions?key=abc");
+    expect(buildChatCompletionsUrl("https://api.xiaomimimo.com/v1#frag"))
+      .toBe("https://api.xiaomimimo.com/v1/chat/completions");
+    expect(buildChatCompletionsUrl("https://api.xiaomimimo.com/v1?key=abc#frag"))
+      .toBe("https://api.xiaomimimo.com/v1/chat/completions?key=abc");
+  });
+
   it("calls MiMo chat completions with assistant-role text and returns WAV audio", async () => {
     const originalFetch = globalThis.fetch;
     let requestBody = "";
