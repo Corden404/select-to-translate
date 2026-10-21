@@ -18,3 +18,7 @@ export function isOptionsSourceTab(value: unknown): value is OptionsSourceTab {
     && typeof source.capturedAt === "number"
     && Number.isFinite(source.capturedAt);
 }
+
+export function isRemotePdfUrl(url: string): boolean {
+  return /^https?:/i.test(url) && /\.pdf(?:$|[?#])/i.test(url);
+}

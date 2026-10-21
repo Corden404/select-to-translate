@@ -1,5 +1,5 @@
 import type { ConnectionTestResponse } from "../shared/messages";
-import { OPTIONS_SOURCE_STORAGE_KEY, isOptionsSourceTab } from "../shared/options-source";
+import { OPTIONS_SOURCE_STORAGE_KEY, isOptionsSourceTab, isRemotePdfUrl } from "../shared/options-source";
 import {
   AUTO_LOOKUP_STORAGE_KEY,
   DEFAULT_PROMPTS,
@@ -145,7 +145,7 @@ async function applyOptionsSource(value:unknown):Promise<void>{
     }
   }
   currentSiteHost=siteHost(sourceTabUrl);
-  openPdf.textContent=/^https?:/i.test(sourceTabUrl)&&/\\.pdf(?:$|[?#])/i.test(sourceTabUrl)
+  openPdf.textContent=isRemotePdfUrl(sourceTabUrl)
     ?"用查词阅读器打开来源 PDF"
     :"打开 PDF 阅读器";
   renderSiteControls();
@@ -544,7 +544,7 @@ openHistory.addEventListener("click",()=>{
 });
 openPdf.addEventListener("click",()=>{
   void (async()=>{
-    const source=/^https?:/i.test(sourceTabUrl)&&/\\.pdf(?:$|[?#])/i.test(sourceTabUrl)?sourceTabUrl:"";
+    const source=isRemotePdfUrl(sourceTabUrl)?sourceTabUrl:"";
     const url=chrome.runtime.getURL("pdf.html")+(source?"?src="+encodeURIComponent(source):"");
     await chrome.tabs.create({url});
   })();
