@@ -95,9 +95,12 @@ export function buildChatCompletionsUrl(baseUrl: string): string {
   }
 
   if (/\/chat\/completions$/i.test(url.pathname)) {
+    url.hash = "";
     return url.toString().replace(/\/$/, "");
   }
-  return `${trimmed}/chat/completions`;
+  url.pathname = url.pathname.replace(/\/+$/, "") + "/chat/completions";
+  url.hash = "";
+  return url.toString();
 }
 
 function extractContent(json: unknown): string {

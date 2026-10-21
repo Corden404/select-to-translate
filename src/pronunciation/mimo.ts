@@ -94,7 +94,7 @@ async function readErrorDetails(response: Response): Promise<string> {
   return text.slice(0, 500);
 }
 
-function buildChatCompletionsUrl(baseUrl: string): string {
+export function buildChatCompletionsUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
   if (!trimmed) throw new Error("请先配置 MiMo TTS Base URL。");
 
@@ -112,9 +112,13 @@ function buildChatCompletionsUrl(baseUrl: string): string {
     throw new Error("MiMo TTS 公网 Base URL 必须使用 HTTPS；仅本机回环地址允许 HTTP。");
   }
 
-  return /\/chat\/completions$/i.test(url.pathname)
-    ? url.toString().replace(/\/$/, "")
-    : trimmed + "/chat/completions";
+  if (/\/chat\/completions$/i.test(url.pathname)) {
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "") + "/chat/completions";
+  url.hash = "";
+  return url.toString();
 }
 
 function audioDataFromResponse(root: unknown): string | undefined {
